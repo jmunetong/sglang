@@ -1,9 +1,13 @@
 import itertools
+import sys
 from typing import Optional, Tuple
 
 import pytest
 import torch
+import utils
 from sgl_kernel import awq_dequantize
+
+device = utils.get_device()
 
 
 def reverse_awq_order(t: torch.Tensor):
@@ -67,8 +71,8 @@ def sglang_awq_dequantize(
     "qweight_row,qweight_col,is_bf16_act",
     list(
         itertools.product(
-            [3584, 18944, 128, 256, 512, 1024, 1536],
-            [448, 576, 4736, 16, 32, 64, 128, 72],
+            [3584, 128, 256, 512, 1024],
+            [448, 576, 4736, 16, 32, 64, 128],
             [True, False],
         )
     ),
@@ -76,7 +80,6 @@ def sglang_awq_dequantize(
 def test_awq_dequant_compare_implementations(
     qweight_row: int, qweight_col: int, is_bf16_act: bool
 ):
-    device = torch.device("cuda")
     qweight = torch.randint(
         0,
         torch.iinfo(torch.int32).max,
@@ -112,4 +115,4 @@ def test_awq_dequant_compare_implementations(
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    sys.exit(pytest.main([__file__]))

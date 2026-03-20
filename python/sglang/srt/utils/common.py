@@ -329,6 +329,27 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+def maybe_init_sgl_flash_attn_file_logging() -> None:
+    """Import ``sgl_kernel.flash_attn`` when file logging env is set.
+
+    Call from the main process before spawning TP / scheduler workers (``spawn`` start method).
+    That creates the log file on the configured path immediately; otherwise only worker
+    processes import the module and some test harnesses poll the path before any worker runs.
+    """
+    if not (os.environ.get("SGL_FLASH_ATTN_LOG_FILE") or "").strip():
+        if (os.environ.get("SGL_FLASH_ATTN_LOG") or "").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return
+    try:
+        import sgl_kernel.flash_attn  # noqa: F401
+    except Exception:
+        pass
+
+
 _warned_bool_env_var_keys = set()
 
 

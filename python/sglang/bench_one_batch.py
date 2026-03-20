@@ -81,6 +81,7 @@ from sglang.srt.utils import (
     configure_logger,
     get_bool_env_var,
     kill_process_tree,
+    maybe_init_sgl_flash_attn_file_logging,
     maybe_reindex_device_id,
     require_mlp_sync,
     require_mlp_tp_gather,
@@ -792,6 +793,7 @@ def main(server_args, bench_args):
     server_args.cuda_graph_max_bs = max(bench_args.batch_size)
 
     _set_envs_and_config(server_args)
+    maybe_init_sgl_flash_attn_file_logging()
 
     if server_args.model_path:
         if bench_args.correctness_test:

@@ -117,6 +117,14 @@ class LlamaMLP(nn.Module):
 
 
 class LlamaAttention(nn.Module):
+    """Self-attention for Llama; uses ``RadixAttention`` with ``layer_id`` for KV shards.
+
+    With ``--attention-backend intel_xpu``, flash-attn calls log ``iteration`` (decode or
+    prefill pass index) and ``layer`` (this module's ``layer_id``) when
+    ``SGL_FLASH_ATTN_LOG_FILE`` / ``SGL_FLASH_ATTN_LOG`` are configured; see
+    ``sgl_kernel.flash_attn`` and ``XPUAttentionBackend.init_forward_metadata``.
+    """
+
     def __init__(
         self,
         config: LlamaConfig,

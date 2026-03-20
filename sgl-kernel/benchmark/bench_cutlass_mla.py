@@ -1,27 +1,12 @@
 import argparse
-import copy
 import itertools
-import os
 
 import torch
 import triton
 from sgl_kernel import cutlass_mla_decode, cutlass_mla_get_workspace_size
 
-from sglang.srt.utils import get_device_capability
-
-# CI environment detection
-IS_CI = (
-    os.getenv("CI", "false").lower() == "true"
-    or os.getenv("GITHUB_ACTIONS", "false").lower() == "true"
-)
-
-# CI environment uses simplified parameters
-if IS_CI:
-    bs_range = [1]  # Single batch size for CI
-    qlen_range = [64]  # Single sequence length for CI
-else:
-    bs_range = [1, 8, 32, 64, 128, 256]
-    qlen_range = [1, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+bs_range = [1, 8, 32, 64, 128, 256]
+qlen_range = [1, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
 configs = list(itertools.product(bs_range, qlen_range))
 
@@ -52,7 +37,6 @@ configs = list(itertools.product(bs_range, qlen_range))
 )
 def benchmark(batch_size, seq_len, provider, block_size, num_kv_splits):
     d = 576
-    dn = 64
     dv = 512
 
     h_q_map = {
@@ -78,11 +62,7 @@ def benchmark(batch_size, seq_len, provider, block_size, num_kv_splits):
     pack_factor = 128 // block_size
     block_num = ((block_num + pack_factor - 1) // pack_factor) * pack_factor
 
-    qn = (
-        torch.randn(h_q, batch_size, d - dn, dtype=torch.bfloat16, device="cuda")
-        * 100.0
-    )
-    qr = torch.randn(batch_size, h_q, dn, dtype=torch.bfloat16, device="cuda") * 100.0
+    q = torch.randn(batch_size, h_q, d, dtype=torch.bfloat16, device="cuda") * 100.0
     block_table = torch.randint(
         0,
         batch_size * block_num,
@@ -101,25 +81,18 @@ def benchmark(batch_size, seq_len, provider, block_size, num_kv_splits):
     workspace = torch.empty(workspace_size, device="cuda", dtype=torch.uint8)
 
     quantiles = [0.5, 0.2, 0.8]
-    ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
+    ms, min_ms, max_ms = triton.testing.do_bench(
         lambda: cutlass_mla_decode(
-            qn.transpose(0, 1),
-            qr,
-            kv_cache,
-            seq_lens,
-            block_table,
-            workspace,
-            1.44,
-            num_kv_splits,
+            q, kv_cache, seq_lens, block_table, workspace, num_kv_splits
         ),
         quantiles=quantiles,
     )
 
-    q_size = qn.numel() * qn.element_size() + qr.numel() * qr.element_size()
-
     gbps = (
         lambda ms: (
-            q_size + q_size * dv / d + kv_cache.numel() * kv_cache.element_size()
+            q.numel() * q.element_size()
+            + q.numel() * q.element_size() * dv / d
+            + kv_cache.numel() * kv_cache.element_size()
         )
         * 1e-9
         / (ms * 1e-3)
@@ -145,34 +118,15 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # Skip in CI environment or unsupported architectures
-    if IS_CI:
-        major, minor = get_device_capability()
-        if major is None or major < 10:  # Requires compute capability 10.0+
-            print("Skipping Cutlass MLA benchmark in CI environment")
-            if major is not None:
-                print(
-                    f"Cutlass MLA requires compute capability 10.0+, but found {major}.{minor}"
-                )
-            else:
-                print("Could not determine device capability")
-        else:
-            for block_size in args.block_sizes:
-                for kv_split in args.num_kv_splits:
-                    print(f"block_size={block_size}, num_kv_splits={kv_split}: ")
-                    benchmark.run(
-                        print_data=True,
-                        block_size=block_size,
-                        num_kv_splits=kv_split,
-                    )
-            print("Benchmark finished!")
-    else:
-        for block_size in args.block_sizes:
-            for kv_split in args.num_kv_splits:
-                print(f"block_size={block_size}, num_kv_splits={kv_split}: ")
-                benchmark.run(
-                    print_data=True,
-                    block_size=block_size,
-                    num_kv_splits=kv_split,
-                )
-        print("Benchmark finished!")
+    for block_size in args.block_sizes:
+        for kv_split in args.num_kv_splits:
+            print(f"block_size={block_size}, num_kv_splits={kv_split}: ")
+            benchmark.run(
+                print_data=True,
+                show_plots=True,
+                save_path="bench_blackwell_mla_res",
+                block_size=block_size,
+                num_kv_splits=kv_split,
+            )
+
+    print("Benchmark finished!")

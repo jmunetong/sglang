@@ -1,7 +1,10 @@
 import pytest
 import torch
 import torch.nn.functional as F
+import utils
 from sgl_kernel import dsv3_router_gemm
+
+device = utils.get_device()
 
 
 @pytest.mark.parametrize("num_tokens", [i + 1 for i in range(16)])
@@ -10,10 +13,10 @@ def test_dsv3_router_gemm(num_tokens, num_experts):
     hidden_dim = 7168
 
     mat_a = torch.randn(
-        (num_tokens, hidden_dim), dtype=torch.bfloat16, device="cuda"
+        (num_tokens, hidden_dim), dtype=torch.bfloat16, device=device
     ).contiguous()
     mat_b = torch.randn(
-        (num_experts, hidden_dim), dtype=torch.bfloat16, device="cuda"
+        (num_experts, hidden_dim), dtype=torch.bfloat16, device=device
     ).contiguous()
 
     bf16_ref = F.linear(mat_a, mat_b)

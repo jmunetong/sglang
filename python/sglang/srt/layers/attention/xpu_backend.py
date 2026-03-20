@@ -23,6 +23,18 @@ from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 
+def _xpu_flash_attn_debug_kw(
+    forward_batch: ForwardBatch, layer: "RadixAttention"
+) -> dict:
+    return dict(
+        _flash_attn_debug_iteration=getattr(
+            forward_batch, "flash_attn_debug_pass_id", None
+        ),
+        _flash_attn_debug_layer_id=getattr(layer, "layer_id", None),
+        _flash_attn_debug_kind=getattr(forward_batch, "flash_attn_debug_kind", None),
+    )
+
+
 class XPUAttentionBackend(AttentionBackend):
     """XPU FlashAttention backend, currently based on FlashAttentionBackend, will be refactored later.
 
@@ -89,9 +101,28 @@ class XPUAttentionBackend(AttentionBackend):
         self.has_swa = (
             self.sliding_window_size is not None and self.sliding_window_size > -1
         )
+        # Per-process decode / prefill pass counters for flash-attn debug logging
+        self._fa_debug_decode_pass = 0
+        self._fa_debug_prefill_pass = 0
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Initialize forward metadata hence all layers in the forward pass can reuse it."""
+        if forward_batch.forward_mode.is_idle():
+            forward_batch.flash_attn_debug_pass_id = None
+            forward_batch.flash_attn_debug_kind = "idle"
+        elif (
+            forward_batch.forward_mode.is_decode()
+            or forward_batch.forward_mode.is_target_verify()
+            or forward_batch.forward_mode.is_prebuilt()
+        ):
+            self._fa_debug_decode_pass += 1
+            forward_batch.flash_attn_debug_pass_id = self._fa_debug_decode_pass - 1
+            forward_batch.flash_attn_debug_kind = "decode"
+        else:
+            self._fa_debug_prefill_pass += 1
+            forward_batch.flash_attn_debug_pass_id = self._fa_debug_prefill_pass - 1
+            forward_batch.flash_attn_debug_kind = "prefill"
+
         metadata = FlashAttentionMetadata()
         seqlens_in_batch = forward_batch.seq_lens
         batch_size = forward_batch.batch_size
@@ -514,6 +545,7 @@ class XPUAttentionBackend(AttentionBackend):
                 v_descale=v_descale,
                 return_softmax_lse=use_cascade_attn,
                 **kwargs,
+                **_xpu_flash_attn_debug_kw(forward_batch, layer),
             )
 
             if use_cascade_attn:
@@ -535,6 +567,7 @@ class XPUAttentionBackend(AttentionBackend):
                     v_descale=v_descale,
                     return_softmax_lse=True,
                     **kwargs,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
                 o, _ = merge_state_v2_wrapper(
                     o,
@@ -573,6 +606,7 @@ class XPUAttentionBackend(AttentionBackend):
                         softmax_scale=layer.scaling,
                         causal=False,
                         return_softmax_lse=True,
+                        **_xpu_flash_attn_debug_kw(forward_batch, layer),
                     )
                 else:
                     # MHA for extend part of sequence without attending prefix kv cache
@@ -587,6 +621,7 @@ class XPUAttentionBackend(AttentionBackend):
                         softmax_scale=layer.scaling,
                         causal=True,
                         return_softmax_lse=forward_batch.mha_return_lse,
+                        **_xpu_flash_attn_debug_kw(forward_batch, layer),
                     )
                 if forward_batch.mha_return_lse:
                     output, lse, *rest = output
@@ -635,6 +670,7 @@ class XPUAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
                 if use_cascade_attn:
                     o, softmax_lse, *rest = result
@@ -656,6 +692,7 @@ class XPUAttentionBackend(AttentionBackend):
                             k_descale=k_descale,
                             v_descale=v_descale,
                             return_softmax_lse=True,
+                            **_xpu_flash_attn_debug_kw(forward_batch, layer),
                         )
                     )
                     o, _ = merge_state_v2_wrapper(
@@ -774,6 +811,7 @@ class XPUAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     **kwargs,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
             elif use_local_attn:
                 # Use chunked (local) attention batching for self-attention
@@ -793,6 +831,7 @@ class XPUAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     **kwargs,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
             else:
                 page_table = metadata.page_table
@@ -821,6 +860,7 @@ class XPUAttentionBackend(AttentionBackend):
                     v_descale=v_descale,
                     return_softmax_lse=use_cascade_attn,
                     **kwargs,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
                 if use_cascade_attn:
                     o, softmax_lse, *rest = result
@@ -842,6 +882,7 @@ class XPUAttentionBackend(AttentionBackend):
                             v_descale=v_descale,
                             return_softmax_lse=True,
                             **kwargs,
+                            **_xpu_flash_attn_debug_kw(forward_batch, layer),
                         )
                     )
                     o, _ = merge_state_v2(
@@ -896,6 +937,7 @@ class XPUAttentionBackend(AttentionBackend):
                 k_descale=k_descale,
                 v_descale=v_descale,
                 return_softmax_lse=use_cascade_attn,  # softmax_lse is needed for merge states
+                **_xpu_flash_attn_debug_kw(forward_batch, layer),
             )
             if use_cascade_attn:
                 o, softmax_lse, *rest = result
@@ -916,6 +958,7 @@ class XPUAttentionBackend(AttentionBackend):
                     k_descale=k_descale,
                     v_descale=v_descale,
                     return_softmax_lse=True,
+                    **_xpu_flash_attn_debug_kw(forward_batch, layer),
                 )
                 o, _ = merge_state_v2(
                     o,

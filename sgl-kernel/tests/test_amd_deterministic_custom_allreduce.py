@@ -21,6 +21,9 @@ import socket
 import pytest
 import torch
 import torch.distributed as dist
+import utils
+
+device = utils.get_device()
 
 
 def get_open_port():
@@ -30,11 +33,11 @@ def get_open_port():
 
 
 def worker(world_size, rank, port):
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
-
+    device = torch.device(f"{device}:{rank}")
+    torch.accelerator.set_device_index(device)
+    backend = torch.distributed.get_default_backend_for_device(device)
     dist.init_process_group(
-        backend="nccl",
+        backend=backend,
         init_method=f"tcp://localhost:{port}",
         rank=rank,
         world_size=world_size,
@@ -127,7 +130,7 @@ def worker(world_size, rank, port):
         else:
             # For smaller inputs, use unregistered mode (copies to internal buffer)
             result = custom_ar.deterministic_all_reduce(inp, registered=False)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Store checksum
         checksum = result.view(-1).sum().item()
@@ -195,7 +198,7 @@ def worker(world_size, rank, port):
                 result_flat = custom_ar.deterministic_all_reduce(
                     batch_flat, registered=False
                 )
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
             # Reshape back to (bs, hidden_dim)
             batch_out = result_flat.view(bs, hidden_dim)
@@ -236,7 +239,7 @@ def worker(world_size, rank, port):
 
 def main():
     world_size = 8
-    available_gpus = torch.cuda.device_count()
+    available_gpus = torch.accelerator.device_count()
 
     print("=" * 70)
     print("Deterministic Kernel All-Reduce Determinism Test")
@@ -268,8 +271,8 @@ def main():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
-    reason="Requires at least 2 CUDA GPUs",
+    not torch.accelerator.is_available() or torch.accelerator.device_count() < 2,
+    reason="Requires at least 2 GPUs",
 )
 def test_deterministic_custom_allreduce():
     """Test that deterministic custom all-reduce produces consistent results."""

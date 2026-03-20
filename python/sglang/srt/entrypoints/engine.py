@@ -91,6 +91,7 @@ from sglang.srt.utils import (
     is_cuda,
     kill_process_tree,
     launch_dummy_health_check_server,
+    maybe_init_sgl_flash_attn_file_logging,
     maybe_reindex_device_id,
     numa_utils,
     set_prometheus_multiproc_dir,
@@ -615,6 +616,7 @@ class Engine(EngineBase):
         # Configure global environment
         configure_logger(server_args)
         _set_envs_and_config(server_args)
+        maybe_init_sgl_flash_attn_file_logging()
         server_args.check_server_args()
 
         # Allocate ports for inter-process communications

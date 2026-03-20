@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
+import utils
 from einops import rearrange, repeat
 from sgl_kernel.sparse_flash_attn import (
     convert_vertical_slash_indexes,
@@ -10,6 +11,8 @@ from sgl_kernel.sparse_flash_attn import (
     sparse_attn_func,
 )
 from test_flash_attention import construct_local_mask, is_fa3_supported
+
+device = utils.get_device()
 
 
 def ref_attn(
@@ -202,7 +205,7 @@ def test_sparse_attention(
     dtype,
     NNZ_S,
 ) -> None:
-    torch.set_default_device("cuda")
+    torch.set_default_device(device)
     torch.cuda.manual_seed_all(0)
     block_size_M = 64
     block_size_N = 64
@@ -267,13 +270,13 @@ def test_sparse_attention(
 @pytest.mark.parametrize("causal", [True, False])
 def test_convert_vertical_slash_indexes(causal):
     # Prepare small, hand-checkable inputs
-    q_seqlens = torch.tensor([4], dtype=torch.int32, device="cuda")  # [BATCH]
-    kv_seqlens = torch.tensor([4], dtype=torch.int32, device="cuda")
+    q_seqlens = torch.tensor([4], dtype=torch.int32, device=device)  # [BATCH]
+    kv_seqlens = torch.tensor([4], dtype=torch.int32, device=device)
     vertical_indexes = torch.tensor(
-        [[[1, 3]]], dtype=torch.int32, device="cuda"
+        [[[1, 3]]], dtype=torch.int32, device=device
     )  # [BATCH, N_HEADS, NNZ_V]
     slash_indexes = torch.tensor(
-        [[[2]]], dtype=torch.int32, device="cuda"
+        [[[2]]], dtype=torch.int32, device=device
     )  # [BATCH, N_HEADS, NNZ_S]
     context_size = 4
     block_size_M = 2
@@ -303,14 +306,14 @@ def test_convert_vertical_slash_indexes(causal):
     # - column_index: the actual vertical indices
 
     expected_column_index = torch.tensor(
-        [[[[0, 0], [0, 0]]]], dtype=torch.int32, device="cuda"
+        [[[[0, 0], [0, 0]]]], dtype=torch.int32, device=device
     )
 
     # If causal=False, update these tensors according to expected behavior
     if not causal:
         # Update these values if your kernel produces different output in non-causal mode
         expected_column_index = torch.tensor(
-            [[[[1, 0], [1, 3]]]], dtype=torch.int32, device="cuda"
+            [[[[1, 0], [1, 3]]]], dtype=torch.int32, device=device
         )
 
     # Assert that outputs match expectations
@@ -325,8 +328,8 @@ def test_convert_vertical_slash_indexes(causal):
 @pytest.mark.parametrize("causal", [True, False])
 def test_convert_vertical_slash_indexes_mergehead(causal):
     # Prepare small, hand-checkable inputs for mergehead version
-    q_seqlens = torch.tensor([4], dtype=torch.int32, device="cuda")
-    kv_seqlens = torch.tensor([4], dtype=torch.int32, device="cuda")
+    q_seqlens = torch.tensor([4], dtype=torch.int32, device=device)
+    kv_seqlens = torch.tensor([4], dtype=torch.int32, device=device)
     vertical_indexes = torch.tensor(
         [
             [
@@ -335,7 +338,7 @@ def test_convert_vertical_slash_indexes_mergehead(causal):
             ]
         ],
         dtype=torch.int32,
-        device="cuda",
+        device=device,
     )  # [BATCH, N_HEADS, NNZ_V]
     slash_indexes = torch.tensor(
         [
@@ -345,10 +348,10 @@ def test_convert_vertical_slash_indexes_mergehead(causal):
             ]
         ],
         dtype=torch.int32,
-        device="cuda",
+        device=device,
     )  # [BATCH, N_HEADS, NNZ_S]
-    vertical_indices_count = torch.tensor([2, 1], dtype=torch.int32, device="cuda")
-    slash_indices_count = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+    vertical_indices_count = torch.tensor([2, 1], dtype=torch.int32, device=device)
+    slash_indices_count = torch.tensor([1, 2], dtype=torch.int32, device=device)
     context_size = 4
     block_size_M = 2
     block_size_N = 2
@@ -377,7 +380,7 @@ def test_convert_vertical_slash_indexes_mergehead(causal):
     expected_column_index = torch.tensor(
         [[[[1, 0], [1, 3]], [[-1079459945, -1077788999], [-1080050043, -1104625879]]]],
         dtype=torch.int32,
-        device="cuda",
+        device=device,
     )
 
     if not causal:
@@ -385,7 +388,7 @@ def test_convert_vertical_slash_indexes_mergehead(causal):
         expected_column_index = torch.tensor(
             [[[[1, 0], [1, 3]], [[2, -1077788999], [2, -1104625879]]]],
             dtype=torch.int32,
-            device="cuda",
+            device=device,
         )
 
     # Assert that outputs match expectations

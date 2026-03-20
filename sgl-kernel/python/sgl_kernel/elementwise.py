@@ -1,78 +1,9 @@
 from typing import Optional
 
 import torch
-from sgl_kernel.utils import is_arch_support_pdl
-
-try:
-    import flashinfer.norm as _flashinfer_norm
-
-    _has_flashinfer = True
-except ImportError:
-    _has_flashinfer = False
-
-_FLASHINFER_NORM_SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
+from sgl_kernel.utils import get_xpu_stream
 
 
-def _rmsnorm_internal(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    out: Optional[torch.Tensor],
-    enable_pdl: Optional[bool],
-) -> torch.Tensor:
-    if out is None:
-        out = torch.empty_like(input)
-    if enable_pdl is None:
-        enable_pdl = is_arch_support_pdl()
-    torch.ops.sgl_kernel.rmsnorm.default(out, input, weight, eps, enable_pdl)
-    return out
-
-
-def _fused_add_rmsnorm_internal(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    enable_pdl: Optional[bool],
-) -> None:
-    if enable_pdl is None:
-        enable_pdl = is_arch_support_pdl()
-    torch.ops.sgl_kernel.fused_add_rmsnorm.default(
-        input, residual, weight, eps, enable_pdl
-    )
-
-
-def _gemma_rmsnorm_internal(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    out: Optional[torch.Tensor],
-    enable_pdl: Optional[bool],
-) -> torch.Tensor:
-    if out is None:
-        out = torch.empty_like(input)
-    if enable_pdl is None:
-        enable_pdl = is_arch_support_pdl()
-    torch.ops.sgl_kernel.gemma_rmsnorm.default(out, input, weight, eps, enable_pdl)
-    return out
-
-
-def _gemma_fused_add_rmsnorm_internal(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    enable_pdl: Optional[bool],
-) -> None:
-    if enable_pdl is None:
-        enable_pdl = is_arch_support_pdl()
-    torch.ops.sgl_kernel.gemma_fused_add_rmsnorm.default(
-        input, residual, weight, eps, enable_pdl
-    )
-
-
-# These implementations extensively draw from and build upon the FlashInfer project https://github.com/flashinfer-ai/flashinfer
-# Kudos to @yzh119
 def rmsnorm(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -95,32 +26,17 @@ def rmsnorm(
     out: Optional[torch.Tensor]
         The output tensor, if specified, the kernel will update this tensor inplace.
     enable_pdl: Optional[bool]
-        Whether to enable `programmatic dependent launch
-        <https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization>`_
-        If None, will be automatically enabled on Hopper architecture.
+        Not Used on XPU.
 
     Returns
     -------
     output: torch.Tensor
         Normalized tensor, shape (batch_size, hidden_size).
     """
-    # torch.compiler.is_dynamo_compiling(): FlashInfer norm paths are not safe under
-    # torch.compile(..., fullgraph=True). Dynamo traces into FlashInfer's JIT module
-    # loading path, which calls Path.exists() / os.stat() — both untraceable — causing
-    # the entire compilation to fail. We fall back to the internal implementation while
-    # tracing as a temporary workaround. Once the upstream fix is merged and we upgrade
-    # FlashInfer, this check can be removed.
-    # See: https://github.com/flashinfer-ai/flashinfer/issues/2734
-    #      https://github.com/flashinfer-ai/flashinfer/pull/2733
-    if (
-        input.device.type == "musa"
-        or not _has_flashinfer
-        or input.dtype not in _FLASHINFER_NORM_SUPPORTED_DTYPES
-        or torch.compiler.is_dynamo_compiling()
-    ):
-        return _rmsnorm_internal(input, weight, eps, out, enable_pdl)
-    else:
-        return _flashinfer_norm.rmsnorm(input, weight, eps, out, enable_pdl)
+    if out is None:
+        out = torch.empty_like(input)
+    torch.ops.sgl_kernel.rmsnorm(out, input, weight, eps)
+    return out
 
 
 def fused_add_rmsnorm(
@@ -149,20 +65,9 @@ def fused_add_rmsnorm(
     eps: float
         Epsilon for numerical stability.
     enable_pdl: Optional[bool]
-        Whether to enable `programmatic dependent launch
-        <https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization>`_
-        If None, will be automatically enabled on Hopper architecture.
+        Not Used on XPU.
     """
-    # See is_dynamo_compiling() comment in rmsnorm() above.
-    if (
-        input.device.type == "musa"
-        or not _has_flashinfer
-        or input.dtype not in _FLASHINFER_NORM_SUPPORTED_DTYPES
-        or torch.compiler.is_dynamo_compiling()
-    ):
-        _fused_add_rmsnorm_internal(input, residual, weight, eps, enable_pdl)
-    else:
-        _flashinfer_norm.fused_add_rmsnorm(input, residual, weight, eps, enable_pdl)
+    torch.ops.sgl_kernel.fused_add_rmsnorm(input, residual, weight, eps)
 
 
 def gemma_rmsnorm(
@@ -187,25 +92,17 @@ def gemma_rmsnorm(
     out: Optional[torch.Tensor]
         The output tensor, if specified, the kernel will update this tensor inplace.
     enable_pdl: Optional[bool]
-        Whether to enable `programmatic dependent launch
-        <https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization>`_
-        If None, will be automatically enabled on Hopper architecture.
+        Not Used on XPU.
 
     Returns
     -------
     output: torch.Tensor
         Gemma Normalized tensor, shape (batch_size, hidden_size).
     """
-    # See is_dynamo_compiling() comment in rmsnorm() above.
-    if (
-        input.device.type == "musa"
-        or not _has_flashinfer
-        or input.dtype not in _FLASHINFER_NORM_SUPPORTED_DTYPES
-        or torch.compiler.is_dynamo_compiling()
-    ):
-        return _gemma_rmsnorm_internal(input, weight, eps, out, enable_pdl)
-    else:
-        return _flashinfer_norm.gemma_rmsnorm(input, weight, eps, out, enable_pdl)
+    if out is None:
+        out = torch.empty_like(input)
+    torch.ops.sgl_kernel.gemma_rmsnorm(out, input, weight, eps)
+    return out
 
 
 def gemma_fused_add_rmsnorm(
@@ -234,22 +131,9 @@ def gemma_fused_add_rmsnorm(
     eps: float
         Epsilon for numerical stability.
     enable_pdl: Optional[bool]
-        Whether to enable `programmatic dependent launch
-        <https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization>`_
-        If None, will be automatically enabled on Hopper architecture.
+        Not Used on XPU.
     """
-    # See is_dynamo_compiling() comment in rmsnorm() above.
-    if (
-        input.device.type == "musa"
-        or not _has_flashinfer
-        or input.dtype not in _FLASHINFER_NORM_SUPPORTED_DTYPES
-        or torch.compiler.is_dynamo_compiling()
-    ):
-        _gemma_fused_add_rmsnorm_internal(input, residual, weight, eps, enable_pdl)
-    else:
-        _flashinfer_norm.gemma_fused_add_rmsnorm(
-            input, residual, weight, eps, enable_pdl
-        )
+    torch.ops.sgl_kernel.gemma_fused_add_rmsnorm(input, residual, weight, eps)
 
 
 def _check_shape(input: torch.Tensor, output: torch.Tensor) -> None:
@@ -273,7 +157,7 @@ def silu_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
             device=input.device,
             dtype=input.dtype,
         )
-    torch.ops.sgl_kernel.silu_and_mul.default(out, input)
+    torch.ops.sgl_kernel.silu_and_mul(out, input)
     return out
 
 
@@ -288,7 +172,7 @@ def gelu_tanh_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Te
             device=input.device,
             dtype=input.dtype,
         )
-    torch.ops.sgl_kernel.gelu_tanh_and_mul.default(out, input)
+    torch.ops.sgl_kernel.gelu_tanh_and_mul(out, input)
     return out
 
 
@@ -303,82 +187,149 @@ def gelu_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
             device=input.device,
             dtype=input.dtype,
         )
-    torch.ops.sgl_kernel.gelu_and_mul.default(out, input)
+    torch.ops.sgl_kernel.gelu_and_mul(out, input)
     return out
 
 
-if torch.version.hip is not None:
-
-    def gelu_quick(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
-        """
-        Quick-GELU:  y = x * sigmoid(1.702 * x)
-
-        The CUDA/HIP kernel uses 128-bit (16-byte) vector loads & stores,
-        so the last-dimension byte length must be a multiple of 16 bytes.
-        """
-        if input.shape[-1] * input.dtype.itemsize % 16 != 0:
-            raise ValueError(
-                f"The last dimension ({input.shape[-1]}) x itemsize "
-                f"({input.dtype.itemsize}) must be a multiple of 16 bytes."
-            )
-
-        if out is not None:
-            assert input.shape == out.shape, f"{input.shape} != {out.shape}"
-        else:
-            out = torch.empty_like(input)
-
-        torch.ops.sgl_kernel.gelu_quick(out, input)
-        return out
-
-
-def rotary_embedding(
+def apply_rope_with_cos_sin_cache_inplace(
     positions: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool = True,
-):
-    torch.ops.sgl_kernel.rotary_embedding.default(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
-
-
-def downcast_fp8(
-    k: torch.Tensor,
-    v: torch.Tensor,
-    k_out: torch.Tensor,
-    v_out: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    loc: torch.Tensor,
-    mult: int = 1,
-    offset: int = 0,
 ) -> None:
-    torch.ops.sgl_kernel.downcast_fp8(
-        k, v, k_out, v_out, k_scale, v_scale, loc, mult, offset
+    r"""
+    Apply rotary embedding to keys and queries with precomputed cos/sin values.
+    This is designed to be compatible with the SGL/vLLM implementation.
+    The result is inplace applied to the input tensors.
+
+    Parameters
+    ----------
+    positions : torch.Tensor
+        Position indices, shape: ``(nnz)``.
+    query : torch.Tensor
+        Query tensor, shape: ``(nnz, num_q_heads * head_size)``.
+    key : torch.Tensor
+        Key tensor, shape: ``(nnz, num_k_heads * head_size)``.
+    cos_sin_cache : torch.Tensor
+        Cosine and Sine cache tensor, shape: ``(max_seq_len, rotary_dim)``.
+        Cosine is the first half and Sine is the second half on rotary_dim.
+    is_neox : bool
+        Whether to use Neox style RoPE, default: ``True``.
+
+        * If ``True``, the last dimension of the query/key tensor is not interleaved, i.e.,
+          we rotate the first half dimensions ``([..., :head_dim//2])`` and the second half
+          dimensions ``([..., head_dim//2:])``.
+
+        * If ``False``, the last dimension of the query/key tensor is interleaved, i.e.,
+          we rotate the even dimensions ``([..., ::2])`` and odd dimensions ``([..., 1::2])``.
+    Note
+    ----
+    The rotary dimension is determined by the cosine cache and sine cache.
+    """
+    if cos_sin_cache.dtype != torch.float32:
+        raise ValueError("cos_sin_cache should be float32")
+
+    torch.ops.sgl_kernel.apply_rope_pos_ids_cos_sin_cache.default(
+        query.view(query.shape[0], -1, head_size),
+        key.view(key.shape[0], -1, head_size),
+        query.view(query.shape[0], -1, head_size),
+        key.view(key.shape[0], -1, head_size),
+        cos_sin_cache,
+        positions.long(),
+        (not is_neox),
+        get_xpu_stream(),
     )
 
 
-def copy_to_gpu_no_ce(input: torch.Tensor, output: torch.Tensor):
-    torch.ops.sgl_kernel.copy_to_gpu_no_ce(input, output)
+def fused_qk_norm_rope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    base: float,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+    factor: float = 1.0,
+    low: float = 1.0,
+    high: float = 1.0,
+    attention_factor: float = 1.0,
+    rotary_dim: int = None,
+) -> None:
+    r"""Fused QK RMS normalization and RoPE application.
 
+    This operator applies RMS normalization and RoPE (Rotary Position Embedding)
+    to Q and K tensors in a single CUDA/SYCL kernel. The operation is performed
+    in-place on the input qkv tensor.
 
-def concat_mla_k(
-    k: torch.Tensor,
-    k_nope: torch.Tensor,
-    k_rope: torch.Tensor,
-):
-    torch.ops.sgl_kernel.concat_mla_k(k, k_nope, k_rope)
+    Parameters
+    ----------
+    qkv : torch.Tensor
+        Combined QKV tensor, shape: ``(num_tokens, (num_heads_q + num_heads_k + num_heads_v) * head_dim)``.
+        The tensor is modified in-place.
+    num_heads_q : int
+        Number of query heads.
+    num_heads_k : int
+        Number of key heads.
+    num_heads_v : int
+        Number of value heads.
+    head_dim : int
+        Dimension per head.
+    eps : float
+        Epsilon for RMS normalization.
+    q_weight : torch.Tensor
+        RMSNorm weights for query, shape: ``(head_dim,)``.
+    k_weight : torch.Tensor
+        RMSNorm weights for key, shape: ``(head_dim,)``.
+    base : float
+        Base for RoPE computation.
+    is_neox : bool
+        Whether RoPE is applied in Neox style.
 
+        * If ``True``, the last dimension of the query/key tensor is not interleaved.
+        * If ``False``, the last dimension of the query/key tensor is interleaved.
+    position_ids : torch.Tensor
+        Position IDs for RoPE, shape: ``(num_tokens,)``.
+    factor : float, optional
+        Scaling factor for YARN (YaRN: Yet another RoPE extensioN method).
+        When it is not 1.0, the model is using YARN. Default: 1.0.
+    low : float, optional
+        YARN low frequency threshold. Default: 1.0.
+    high : float, optional
+        YARN high frequency threshold. Default: 1.0.
+    attention_factor : float, optional
+        Attention factor applied on cos and sin values. Default: 1.0.
+    rotary_dim : int, optional
+        Rotary dimension. If None, defaults to head_dim.
 
-def concat_mla_absorb_q(
-    a: torch.Tensor,
-    b: torch.Tensor,
-):
-    *batch_dims, _ = a.shape
-    out = torch.empty(
-        (*batch_dims, a.shape[-1] + b.shape[-1]), device=a.device, dtype=a.dtype
+    Note
+    ----
+    This is an in-place operation that modifies the qkv tensor directly.
+    Only the Q and K portions of the tensor are modified; V remains unchanged.
+    """
+    if rotary_dim is None:
+        rotary_dim = head_dim
+
+    torch.ops.sgl_kernel.fused_qk_norm_rope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        base,
+        is_neox,
+        position_ids,
+        factor,
+        low,
+        high,
+        attention_factor,
+        rotary_dim,
     )
-    torch.ops.sgl_kernel.concat_mla_absorb_q(a, b, out)
-    return out

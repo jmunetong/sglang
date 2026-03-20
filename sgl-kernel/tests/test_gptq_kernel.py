@@ -1,8 +1,11 @@
 import pytest
 import torch
+import utils
 from sgl_kernel import gptq_gemm
 
 from sglang.srt.layers.quantization.utils import pack_cols, pack_rows
+
+device = utils.get_device()
 
 
 def torch_dequantize(q_weight, q_zeros, scales, g_idx, use_shuffle, bit, K, N):
@@ -60,7 +63,7 @@ def torch_gptq_gemm(
     return c
 
 
-def _test_gptq_gemm_once(M, N, K, bit, group_size, use_shuffle, dtype, device="cuda"):
+def _test_gptq_gemm_once(M, N, K, bit, group_size, use_shuffle, dtype, device=device):
 
     b_fp = torch.randn(K, N, dtype=dtype, device=device)
 
@@ -122,9 +125,9 @@ def _test_gptq_gemm_once(M, N, K, bit, group_size, use_shuffle, dtype, device="c
 @pytest.mark.parametrize("use_shuffle", [False])
 @pytest.mark.parametrize("dtype", [torch.float16])
 def test_gptq_gemm(M, N, K, bit, group_size, use_shuffle, dtype):
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    _test_gptq_gemm_once(M, N, K, bit, group_size, use_shuffle, dtype, "cuda")
+    if not torch.accelerator.is_available():
+        pytest.skip("HW not available")
+    _test_gptq_gemm_once(M, N, K, bit, group_size, use_shuffle, dtype, device)
 
 
 if __name__ == "__main__":

@@ -5,12 +5,14 @@ from typing import Optional, Tuple
 import pytest
 import torch
 import triton
+import utils
 from sgl_kernel.flash_mla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
 
+device = utils.get_device()
 # ================ prefill usage ================ #
 S_Q_PREFILL = [1, 62]
 KV_TOPK_PREFILL = [
@@ -147,18 +149,18 @@ def get_window_size(causal, window):
 
 
 def get_attn_bias(s_q, s_k, causal, window):
-    attn_bias = torch.zeros(s_q, s_k, dtype=torch.float32, device="cuda")
+    attn_bias = torch.zeros(s_q, s_k, dtype=torch.float32, device=device)
     if causal:
-        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device="cuda").tril(
+        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=device).tril(
             diagonal=s_k - s_q
         )
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
     if window > 0:
-        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device="cuda").tril(
+        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=device).tril(
             diagonal=s_k - s_q - window
         )
         attn_bias.masked_fill_(temp_mask, float("-inf"))
-        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device="cuda").tril(
+        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=device).tril(
             diagonal=s_k - s_q + window - 1
         )
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
@@ -224,7 +226,7 @@ def reference_torch_decode(
     """
 
     def get_topk_attn_mask(s_q: int, s_k: int, indices: torch.Tensor):
-        mask = torch.zeros(s_q, s_k, dtype=torch.bool, device="cuda")
+        mask = torch.zeros(s_q, s_k, dtype=torch.bool, device=device)
         for i in range(s_q):
             cur_indices = indices[i]
             valid_indices = cur_indices[cur_indices != -1]
@@ -250,13 +252,13 @@ def reference_torch_decode(
         kv[kv != kv] = 0.0
         attn_weight = query @ kv.transpose(-2, -1)  # [h_q, s_q, s_k]
         if (is_causal and query.size(1) > 1) or indices is not None:
-            mask = torch.ones(s_q, s_k, dtype=torch.bool, device="cuda")
+            mask = torch.ones(s_q, s_k, dtype=torch.bool, device=device)
             if is_causal:
                 assert indices is None
                 mask = mask.tril(diagonal=s_k - s_q)
             if indices is not None:
                 mask &= get_topk_attn_mask(s_q, s_k, indices)
-            attn_bias = torch.zeros(s_q, s_k, dtype=torch.float, device="cuda")
+            attn_bias = torch.zeros(s_q, s_k, dtype=torch.float, device=device)
             attn_bias.masked_fill_(mask.logical_not(), float("-inf"))
             attn_weight += attn_bias.to(q.dtype)
         attn_weight /= math.sqrt(query.size(-1))
@@ -274,8 +276,8 @@ def reference_torch_decode(
     block_size = blocked_k.size(1)
     h_kv = blocked_k.size(2)
     cache_seqlens_cpu = cache_seqlens.cpu()
-    out_ref = torch.empty(b, s_q, h_q, dv, dtype=torch.float32, device="cuda")
-    lse_ref = torch.empty(b, h_q, s_q, dtype=torch.float32, device="cuda")
+    out_ref = torch.empty(b, s_q, h_q, dv, dtype=torch.float32, device=device)
+    lse_ref = torch.empty(b, h_q, s_q, dtype=torch.float32, device=device)
     for i in range(b):
         cur_len = cache_seqlens_cpu[i].item()
         cur_num_blocks = cdiv(cur_len, block_size)
@@ -303,44 +305,44 @@ def test_flashmla_prefill(
     kv_topk: Tuple[int, int],
 ):
 
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
-    q = torch.randn((1, s_q, 128, 576), dtype=torch.bfloat16, device="cuda") / 10
-    kv = torch.randn((1, kv_topk[0], 1, 576), dtype=torch.bfloat16, device="cuda") / 10
+    q = torch.randn((1, s_q, 128, 576), dtype=torch.bfloat16, device=device) / 10
+    kv = torch.randn((1, kv_topk[0], 1, 576), dtype=torch.bfloat16, device=device) / 10
 
     q.clamp_(-10, 10)
     kv.clamp_(-10, 10)
 
     indices = torch.full(
-        (1, s_q, 1, kv_topk[1]), kv_topk[0], dtype=torch.int32, device="cuda"
+        (1, s_q, 1, kv_topk[1]), kv_topk[0], dtype=torch.int32, device=device
     )
     for s in range(s_q):
         # NOTE We use the following method to generate indices so that most indices lies within [s_kv-20000, s_kv), which is more realistic for sparse attention
         near_mask = (
-            torch.randint(0, 32, (min(kv_topk[1], kv_topk[0]),), device="cuda") < 31
+            torch.randint(0, 32, (min(kv_topk[1], kv_topk[0]),), device=device) < 31
         )
-        cur_indices = torch.randperm(kv_topk[0], device="cuda")[: kv_topk[1]]
+        cur_indices = torch.randperm(kv_topk[0], device=device)[: kv_topk[1]]
         cur_indices[near_mask] = torch.randint(
             max(0, kv_topk[0] - 20000),
             kv_topk[0] - 1,
             (near_mask.sum().item(),),
-            device="cuda",
+            device=device,
         )
         if len(cur_indices) < kv_topk[1]:
             cur_indices = torch.cat(
                 [
                     cur_indices,
                     torch.full(
-                        (kv_topk[1] - len(cur_indices),), 2147480000, device="cuda"
+                        (kv_topk[1] - len(cur_indices),), 2147480000, device=device
                     ),
                 ]
             )
-        cur_indices = cur_indices[torch.randperm(kv_topk[1], device="cuda")]
+        cur_indices = cur_indices[torch.randperm(kv_topk[1], device=device)]
         indices[0, s, 0] = cur_indices
     indices = indices.to(q.device)
 
     sm_scale = 1 / math.sqrt(576)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     ans_out, ans_max_logits, ans_lse = flash_mla_sparse_fwd(
         q.squeeze(0), kv.squeeze(0), indices.squeeze(0), sm_scale=sm_scale
@@ -352,11 +354,11 @@ def test_flashmla_prefill(
         ans_lse.float(),
     )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     ref_max_logits, ref_lse, ref_out = reference_torch_prefill(
         s_q, kv_topk[0], kv_topk[1], indices, q, kv, sm_scale
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     torch.testing.assert_close(ans_out, ref_out, atol=8e-4, rtol=2.01 / 128)
     torch.testing.assert_close(
@@ -368,7 +370,10 @@ def test_flashmla_prefill(
     torch.testing.assert_close(ans_lse, ref_lse, atol=1e-6, rtol=2.01 / 65536)
 
 
-@pytest.mark.skipif(not is_sm90_supported(), reason="SM90 required for FP8 support")
+@pytest.mark.skipif(
+    torch.cuda.is_available() and not is_sm90_supported(),
+    reason="SM90 required for FP8 support",
+)
 @pytest.mark.parametrize("b", B_DECODE)
 @pytest.mark.parametrize("s_q", S_Q_DECODE)
 @pytest.mark.parametrize("s_k", S_K_DECODE)
@@ -393,7 +398,7 @@ def test_flash_mla_decode(
     topk = causal_topk[1]
 
     # Generating test data
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     cache_seqlens_cpu = torch.full((b,), s_k, dtype=torch.int32, device="cpu")
     if is_varlen:
@@ -402,13 +407,13 @@ def test_flash_mla_decode(
 
     max_seqlen = cache_seqlens_cpu.max().item()
     max_seqlen_pad = cdiv(max_seqlen, 256) * 256
-    cache_seqlens = cache_seqlens_cpu.cuda()
+    cache_seqlens = cache_seqlens_cpu.to(device)
 
-    q = torch.randn(b, s_q, 128, d, dtype=torch.bfloat16, device="cuda")
+    q = torch.randn(b, s_q, 128, d, dtype=torch.bfloat16, device=device)
     q.clamp_(min=-1.0, max=1.0)
 
     block_table = torch.arange(
-        b * max_seqlen_pad // block_size, dtype=torch.int32, device="cuda"
+        b * max_seqlen_pad // block_size, dtype=torch.int32, device=device
     ).view(b, max_seqlen_pad // block_size)
     block_table = block_table.view(-1)[torch.randperm(block_table.numel())].view(b, -1)
     blocked_k = (
@@ -418,7 +423,7 @@ def test_flash_mla_decode(
             h_kv,
             d,
             dtype=torch.bfloat16,
-            device="cuda",
+            device=device,
         )
         / 10
     )
@@ -493,11 +498,11 @@ def test_flash_mla_decode(
         blocked_k = blocked_k_dequantized
 
     # Get schedule metadata
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     tile_scheduler_metadata, num_splits = get_mla_metadata(
         cache_seqlens, s_q * h_q // h_kv, h_kv, h_q, is_fp8, topk
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     out_ans, lse_ans = flash_mla_with_kvcache(
         q,
@@ -519,7 +524,10 @@ def test_flash_mla_decode(
     torch.testing.assert_close(lse_ans, lse_ref, atol=1e-6, rtol=8.01 / 65536)
 
 
-@pytest.mark.skipif(not is_sm90_supported(), reason="SM90 required for FP8 support")
+@pytest.mark.skipif(
+    torch.cuda.is_available() and not is_sm90_supported(),
+    reason="SM90 required for FP8 support",
+)
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1, 2])
 @pytest.mark.parametrize("mean_sk", [4096, 8192, 16384])
@@ -535,11 +543,11 @@ def test_flash_mla_decode(
 def test_flash_mla_fp8(
     b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
 ):
-    device = torch.device("cuda:0")
+    device = torch.device(f"{device}:0")
     init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.manual_seed(0)
     random.seed(0)
 

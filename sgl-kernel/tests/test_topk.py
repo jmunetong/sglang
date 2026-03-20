@@ -2,11 +2,14 @@ from typing import Any, Optional
 
 import pytest
 import torch
+import utils
 from sgl_kernel import (
     fast_topk_transform_fused,
     fast_topk_transform_ragged_fused,
     fast_topk_v2,
 )
+
+device = utils.get_device()
 
 
 def _ref_torch_impl(
@@ -107,13 +110,13 @@ def assert_equal(
 def test_topk_kernel(bs: int, k: int, seq_len: int, has_row_starts: bool) -> None:
     torch.manual_seed(42)
 
-    stream = torch.cuda.Stream()
-    torch.cuda.set_stream(stream)
-    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device="cuda")
-    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device="cuda")
+    stream = torch.Stream()
+    torch.Stream(stream)
+    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device=device)
+    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device=device)
 
     if has_row_starts:
-        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device="cuda")
+        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device=device)
     else:
         row_starts = None
 
@@ -136,8 +139,8 @@ def test_topk_kernel(bs: int, k: int, seq_len: int, has_row_starts: bool) -> Non
 def test_topk_transform_kernel(bs: int, k: int, seq_len: int, mode: str) -> None:
     torch.manual_seed(42)
 
-    stream = torch.cuda.Stream()
-    torch.cuda.set_stream(stream)
+    stream = torch.Stream()
+    torch.Stream(stream)
 
     # NOTE: for decode, cumulative seqlens_q is just 0..=bs
     # NOTE: since page table is arange, they equal topk indices
@@ -149,16 +152,16 @@ def test_topk_transform_kernel(bs: int, k: int, seq_len: int, mode: str) -> None
     bs = bs // step
 
     if mode == "extend":
-        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device="cuda")
+        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device=device)
     else:
         row_starts = None
 
-    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device="cuda")
-    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device="cuda")
+    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device=device)
+    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device=device)
     cu_seqlens_q = torch.arange(
-        0, num_tokens + 1, step=step, dtype=torch.int32, device="cuda"
+        0, num_tokens + 1, step=step, dtype=torch.int32, device=device
     )
-    src_page_table = torch.arange(0, seq_len, dtype=torch.int32, device="cuda")
+    src_page_table = torch.arange(0, seq_len, dtype=torch.int32, device=device)
     src_page_table = src_page_table.unsqueeze(0).expand(bs, -1)
 
     dst_page_table_ref = _ref_torch_transform_decode_impl(
@@ -203,18 +206,18 @@ def test_topk_transform_ragged_kernel(
     # Used in prefill only
     torch.manual_seed(42)
 
-    stream = torch.cuda.Stream()
-    torch.cuda.set_stream(stream)
+    stream = torch.Stream()
+    torch.Stream(stream)
     # bs: # of q tokens
-    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device="cuda")
+    score = torch.randn(bs, MAX_SEQ_LEN, dtype=torch.float32, device=device)
     # kv_len
     if has_row_starts:
-        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device="cuda")
+        row_starts = torch.randint(0, 2048, (bs,), dtype=torch.int32, device=device)
     else:
         row_starts = None
-    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device="cuda")
+    lengths = torch.full((bs,), seq_len, dtype=torch.int32, device=device)
     topk_indices_offset = torch.randint(
-        0, 1024, (bs,), dtype=torch.int32, device="cuda"
+        0, 1024, (bs,), dtype=torch.int32, device=device
     )
 
     dst_page_table_ref = _ref_torch_transform_ragged_impl(

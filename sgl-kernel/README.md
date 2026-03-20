@@ -1,101 +1,103 @@
-# sglang-kernel (prior sgl-kernel)
+# SGL Kernel for XPU
 
-[Kernel Library](https://github.com/sgl-project/sglang/tree/main/sgl-kernel) for LLM inference engines
+A fork of [Kernel Library](https://github.com/sgl-project/sglang/tree/main/sgl-kernel) for SGLang support on Intel GPU backend
 
-<div align="center">
-
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://github.com/sgl-project/sglang/blob/main/LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/sglang-kernel)](https://pypi.org/project/sglang-kernel)
-
-</div>
-
-`sglang-kernel` provides optimized compute primitives for LLM inference engines, enabling efficient inference for large language models and vision-language models through custom kernel operations. The source tree remains under the `sgl-kernel/` directory and the Python import path remains `sgl_kernel`.
+[![PyPI](https://img.shields.io/pypi/v/sgl-kernel)](https://pypi.org/project/sgl-kernel)
 
 ## Installation
-Requires torch == 2.9.1
+
+Currently we only support building from source. To use on Intel GPUs, you need to install the Intel GPUs driver first. For installation guide, visit [Intel GPUs Driver Installation](https://www.intel.com/content/www/us/en/developer/articles/tool/pytorch-prerequisites-for-intel-gpu/2-8.html#driver-installation).
+
+## Build from source
+
+Development build:
 
 ```bash
-# Latest version
-pip3 install sglang-kernel --upgrade
+source /PATH/TO/ONEAPI/setvars.sh
+pip install -v .
 ```
 
-## Building from Source
-Requires
-- CMake ≥3.31,
-- Python ≥3.10
-- scikit-build-core
-- ninja(optional)
 
-### Use Makefile to build from the sgl-kernel source tree
+### Build with [ccache](https://github.com/ccache/ccache)
+```bash
+# or `yum install -y ccache`.
+apt-get install -y ccache
+# Building with ccache is enabled when ccache is installed and CCACHE_DIR is set.
+export CCACHE_DIR=/path/to/your/ccache/dir
+export CCACHE_BACKEND=""
+export CCACHE_KEEP_LOCAL_STORAGE="TRUE"
+unset CCACHE_READONLY
+python -m uv build --wheel -Cbuild-dir=build --color=always .
+```
+
+### Parallel Build
+
+We highly recommend you build sgl-kernel-xpu with Ninja. Ninja can automatically build sgl-kernel in parallel.
+And if you build the sgl-kernel-xpu with cmake, you need to add `CMAKE_BUILD_PARALLEL_LEVEL` for parallel build like:
 
 ```bash
-make build
+CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) python -m uv build --wheel -Cbuild-dir=build --color=always .
 ```
 
-### Limit build resource usage (CPU / parallelism)
+### Kernel Development
 
-By default, `make build` uses all available CPU cores. You can override build parallelism and NVCC compile threads:
+Steps to add a new kernel:
 
-```bash
-# Limit parallel jobs (controls both make and cmake parallelism)
-make build MAX_JOBS=2
-
-# Additionally limit NVCC internal threads (reduces CPU and peak memory)
-make build MAX_JOBS=2 CMAKE_ARGS="-DSGL_KERNEL_COMPILE_THREADS=1"
-```
-
-## Contribution
-
-### Steps to add a new kernel:
-
-1. Implement the kernel in [csrc](https://github.com/sgl-project/sglang/tree/main/sgl-kernel/csrc)
-2. Expose the interface in [include/sgl_kernel_ops.h](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/include/sgl_kernel_ops.h)
-3. Create torch extension in [csrc/common_extension.cc](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/csrc/common_extension.cc)
-4. Update [CMakeLists.txt](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/CMakeLists.txt) to include new CUDA source
-5. Expose Python interface in [python](https://github.com/sgl-project/sglang/blob/main/sgl-kernel/python/sgl_kernel)
-6. Add test and benchmark
+1. Implement the kernel in [csrc](https://github.com/sgl-project/sgl-kernel-xpu/tree/main/src/)
+2. Expose the interface in [include/sgl_kernel_ops.h](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/include/sgl_kernel_ops.h)
+3. Create torch extension in [csrc/common_extension.cc](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/src/torch_extension_sycl.cc)
+4. Update [CMakeLists.txt](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/CMakeLists.txt) to include new source files
+5. Expose Python interface in [python](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/python/sgl_kernel)
 
 ### Development Tips
 
-1. When creating torch extensions, add the function definition with `m.def`, and device binding with `m.impl`:
+1. When implementing kernels, only define pure SYCL files and C++ interfaces. If you need to use `Torch::tensor`, use `<torch/all.h>` instead of `<torch/extension.h>`. Using `<torch/extension.h>` will cause compilation errors when using SABI.
+
+2. When creating torch extensions, add the function definition with `m.def`, and device binding with `m.impl`:
+- Using torch.compile need `m.def` with schema, it helps auto capture the custom kernel. Reference: [How to add FakeTensor](https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit?tab=t.0#heading=h.ptttacy8y1u9)
 
 - How to write schema: [Schema reference](https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#func)
 
-   ```cpp
-   // We need def with schema here for torch.compile
-   m.def(
-    "bmm_fp8(Tensor A, Tensor B, Tensor! D, Tensor A_scale, Tensor B_scale, Tensor workspace_buffer, "
-    "int cublas_handle) -> ()");
-   m.impl("bmm_fp8", torch::kCUDA, &bmm_fp8);
-   ```
+### Integrating Third-Party Libraries with Data Type Conversion
 
-### Adapting C++ Native Types for Torch Compatibility
+When integrating new third-party libraries like flash-attention, you may encounter data type compatibility issues between the C++ interface and PyTorch bindings. For example, the third-party code might use `float` or `int` types, while PyTorch requires `double` and `int64_t`.
 
-Third-party C++ libraries often use int and float, but PyTorch bindings require int64_t and double due to Python's type mapping.
+> The reason we need `double` and `int64_t` in torch binding is that TORCH_LIBRARY handles the `Python-to-C++` conversion process. Python's `float` data type actually corresponds to `double` in C++, while Python's `int` corresponds to `int64_t` in C++.
 
-Use make_pytorch_shim from sgl_kernel_torch_shim.h to handle conversions automatically:
+To address this issue, we provide the `make_pytorch_shim` function in [sgl_kernel_torch_shim](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/include/sgl_kernel_torch_shim.h) that handles data type conversions automatically.
+
+When you need to support new data type conversions, you can easily add conversion functions like this:
 
 ```cpp
-
-// Add type conversion for int -> int64_t
+// Map `int` -> `int64_t`
 template <>
 struct pytorch_library_compatible_type<int> {
   using type = int64_t;
   static int convert_from_type(int64_t arg) {
-    TORCH_CHECK(arg <= std::numeric_limits<int>::max(), "value too large");
-    TORCH_CHECK(arg >= std::numeric_limits<int>::min(), "value too small");
+    TORCH_CHECK(arg <= std::numeric_limits<int>::max(), "int64_t value is too large to be converted  to int");
+    TORCH_CHECK(arg >= std::numeric_limits<int>::min(), "int64_t value is too small to be converted to int");
     return arg;
   }
 };
 ```
+
+To use this with your library functions, simply wrap them with make_pytorch_shim:
+
 ```cpp
-// Wrap your function
-m.impl("fwd", torch::kCUDA, make_pytorch_shim(&mha_fwd));
+/*
+ * From flash-attention
+ */
+ m.impl("fwd", torch::kXPU, make_pytorch_shim(&mha_fwd));
 ```
+
+### Contributing
+
+We welcome contributions of all kinds!
+Please read our [Contributing Guidelines](./CONTRIBUTING.md) before submitting a pull request.
 
 ### Testing & Benchmarking
 
-1. Add pytest tests in [tests/](https://github.com/sgl-project/sglang/tree/main/sgl-kernel/tests), if you need to skip some test, please use `@pytest.mark.skipif`
+1. Add pytest tests in [tests/](https://github.com/sgl-project/sgl-kernel-xpu/tree/main/tests), if you need to skip some test, please use `@pytest.mark.skipif`
 
 ```python
 @pytest.mark.skipif(
@@ -104,40 +106,8 @@ m.impl("fwd", torch::kCUDA, make_pytorch_shim(&mha_fwd));
 ```
 
 2. Add benchmarks using [triton benchmark](https://triton-lang.org/main/python-api/generated/triton.testing.Benchmark.html) in [benchmark/](https://github.com/sgl-project/sglang/tree/main/sgl-kernel/benchmark)
-
-   **We recommend using `triton.testing.do_bench_cudagraph` for kernel benchmarking**:
-
-   Compared to `triton.testing.do_bench`, `do_bench_cudagraph` provides:
-   - Reduced CPU overhead impact for more accurate kernel performance measurements
-   - Incorporation of PDL (Programmatic Dependent Launch) effects into individual kernel results
-   - More realistic performance data on PDL-supported architectures (SM >= 90)
-
 3. Run test suite
 
-## Kernel Size Analysis
+### Release new version
 
-Analyze CUDA kernel sizes in compiled wheel files to identify oversized kernels and template-instantiation bloat:
-
-This tool requires `cubloaty` (install with `pip install cubloaty`) to work.
-
-```bash
-# Install cubloaty
-pip install cubloaty
-
-# Analyze a wheel file
-python analyze_whl_kernel_sizes.py path/to/sglang_kernel-*.whl
-
-# Custom output file
-python analyze_whl_kernel_sizes.py path/to/sglang_kernel-*.whl --output my_analysis.txt
-```
-
-The tool generates:
-- A text report with:
-  - Kernel groups (by name prefix)
-  - Individual kernel sizes (sorted by size)
-
-Use this to identify large kernels and potential template instantiation bloat.
-
-## FAQ
-- Q: Segmentation fault with CUDA 12.6
-- A: Update ptxas to 12.8, reference: [segment fault error](https://github.com/Dao-AILab/flash-attention/issues/1453)
+Update version in [pyproject.toml](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/pyproject.toml) and [version.py](https://github.com/sgl-project/sgl-kernel-xpu/blob/main/python/sgl_kernel/version.py)

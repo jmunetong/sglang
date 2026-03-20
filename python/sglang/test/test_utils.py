@@ -846,6 +846,7 @@ def popen_launch_server(
     device: str = "auto",
     pd_separated: bool = False,
     num_replicas: Optional[int] = None,
+    python_executable: Optional[str] = None,
 ):
     """Launch a server process with automatic device detection and offline/online retry.
 
@@ -860,6 +861,9 @@ def popen_launch_server(
         device: Device type ("auto", "cuda", "rocm" or "cpu")
         pd_separated: Whether to use PD separated mode
         num_replicas: Number of replicas for mixed PD mode
+        python_executable: If set, run ``{python_executable} -m sglang.cli.main serve ...``
+            (or ``-m sglang.launch_pd_server``) instead of the ``sglang`` entrypoint on PATH,
+            so the server uses the same interpreter and packages as the test process.
 
     Returns:
         Started subprocess.Popen object
@@ -897,11 +901,22 @@ def popen_launch_server(
     host = host[2:]
 
     use_mixed_pd_engine = not pd_separated and num_replicas is not None
+    _py = python_executable or "python3"
     if pd_separated or use_mixed_pd_engine:
         command = [
-            "python3",
+            _py,
             "-m",
             "sglang.launch_pd_server",
+            "--model-path",
+            model,
+            *[str(x) for x in other_args],
+        ]
+    elif python_executable is not None:
+        command = [
+            python_executable,
+            "-m",
+            "sglang.cli.main",
+            "serve",
             "--model-path",
             model,
             *[str(x) for x in other_args],

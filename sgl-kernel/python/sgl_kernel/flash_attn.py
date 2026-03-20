@@ -1,17 +1,70 @@
-from functools import lru_cache
-from typing import Optional, Union
+import os
+import threading
+from typing import List, Optional, Tuple, Union
 
 import torch
+import torch.nn as nn
 
-try:
-    from sgl_kernel import flash_ops
-except:
-    raise ImportError(
-        "Can not import FA3 in sgl_kernel. Please check your installation."
+# Log file: SGL_FLASH_ATTN_LOG_FILE (preferred) or SGL_FLASH_ATTN_LOG when set to a path.
+# SGL_FLASH_ATTN_LOG=1/true enables related tooling but may not be a path (see tests).
+# Optional: SGL_FLASH_ATTN_LOG_STDOUT=1 to also print to stdout when a file path is set.
+_FLASH_ATTN_LOG_LOCK = threading.Lock()
+
+
+def _flash_attn_resolve_log_path() -> str:
+    p = (os.environ.get("SGL_FLASH_ATTN_LOG_FILE") or "").strip()
+    if p:
+        return p
+    p = (os.environ.get("SGL_FLASH_ATTN_LOG") or "").strip()
+    if p.lower() in ("1", "true", "yes", "on", ""):
+        return ""
+    return p
+
+
+def _flash_attn_build_header(
+    fn_name: str,
+    iteration=None,
+    layer_id=None,
+    kind=None,
+) -> str:
+    """e.g. iteration=0: layer=5: decode: flash_attn_with_kvcache"""
+    parts = []
+    if iteration is not None:
+        parts.append(f"iteration={iteration}")
+    if layer_id is not None:
+        parts.append(f"layer={layer_id}")
+    if kind:
+        parts.append(str(kind))
+    if parts:
+        return ": ".join(parts) + ": " + fn_name
+    return fn_name
+
+
+def _flash_attn_log_args(header: str, **kwargs) -> None:
+    """Log one call site: tensors as shape+dtype, everything else as value."""
+    lines = [f"[flash_attn] {header}"]
+    for name, value in kwargs.items():
+        if isinstance(value, torch.Tensor):
+            lines.append(f"  {name}: shape={tuple(value.shape)}, dtype={value.dtype}")
+        else:
+            lines.append(f"  {name}: {value!r}")
+    text = "\n".join(lines) + "\n"
+
+    log_path = _flash_attn_resolve_log_path()
+    if log_path:
+        with _FLASH_ATTN_LOG_LOCK:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+
+    mirror_stdout = (not log_path) or (
+        os.environ.get("SGL_FLASH_ATTN_LOG_STDOUT", "").strip().lower()
+        in ("1", "true", "yes")
     )
+    if mirror_stdout:
+        print(text, end="")
 
 
-@lru_cache(maxsize=1)
 def is_fa3_supported(device=None) -> bool:
     #  There some fa3 FYI
     #  FA3 can fail without a enough shared memory for a some shapes, such as higher
@@ -21,17 +74,22 @@ def is_fa3_supported(device=None) -> bool:
     #  https://docs.nvidia.com/cuda/cuda-c-programming-guide/#shared-memory-8-x
     #  And for sgl-kernel right now, we can build fa3 on sm80/sm86/sm89/sm90a.
     #  That means if you use A100/A*0/L20/L40/L40s/4090 you can use fa3.
-    return (torch.version.cuda >= "12.3") and (
-        torch.cuda.get_device_capability(device)[0] == 9
-        or torch.cuda.get_device_capability(device)[0] == 8
-    )
+    if torch.cuda.is_available():
+        return (
+            torch.cuda.get_device_capability(device)[0] == 9
+            or torch.cuda.get_device_capability(device)[0] == 8
+        ) and (torch.version.cuda >= "12.3")
+    elif torch.xpu.is_available():
+        return torch.xpu.get_device_properties().has_fp64
+    else:
+        return False
 
 
 def maybe_contiguous(x):
     return x.contiguous() if x is not None and x.stride(-1) != 1 else x
 
 
-def flash_attn_with_kvcache(
+def flash_attn_extended(
     q,
     k_cache,
     v_cache,
@@ -40,7 +98,7 @@ def flash_attn_with_kvcache(
     qv=None,
     rotary_cos=None,
     rotary_sin=None,
-    cache_seqlens: Optional[Union[int, torch.Tensor]] = None,
+    cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
     cache_batch_idx: Optional[torch.Tensor] = None,
     cache_leftpad: Optional[torch.Tensor] = None,
     page_table: Optional[torch.Tensor] = None,
@@ -52,9 +110,9 @@ def flash_attn_with_kvcache(
     k_descale: Optional[torch.Tensor] = None,
     v_descale: Optional[torch.Tensor] = None,
     softmax_scale=None,
+    softmax_sink=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
-    attention_chunk: Optional[int] = None,
     softcap=0.0,  # 0.0 means deactivated
     rotary_interleaved=True,
     scheduler_metadata=None,
@@ -62,10 +120,82 @@ def flash_attn_with_kvcache(
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
     return_softmax_lse=False,
+):
+    assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
+    assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+
+
+def flash_attn_decode(
+    q,
+    k_cache,
+    v_cache,
+    k=None,
+    v=None,
+    qv=None,
+    rotary_cos=None,
+    rotary_sin=None,
+    cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
+    cache_batch_idx: Optional[torch.Tensor] = None,
+    cache_leftpad: Optional[torch.Tensor] = None,
+    page_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k_new: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = None,
+    rotary_seqlens: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    softmax_scale=None,
+    softmax_sink=None,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite context window
+    softcap=0.0,  # 0.0 means deactivated
+    rotary_interleaved=True,
+    scheduler_metadata=None,
+    num_splits=0,  # Can be tuned for speed
+    pack_gqa=None,  # Can be tuned for speed
+    sm_margin=0,  # Can be tuned if some SMs are used for communication
+    return_softmax_lse=False,
+):
+    assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
+    assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+
+
+def flash_attn_with_kvcache(
+    q,
+    k_cache,
+    v_cache,
+    k=None,
+    v=None,
+    qv=None,
+    rotary_cos=None,
+    rotary_sin=None,
+    cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
+    cache_batch_idx: Optional[torch.Tensor] = None,
+    cache_leftpad: Optional[torch.Tensor] = None,
+    page_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_k_new: Optional[torch.Tensor] = None,
+    max_seqlen_q: Optional[int] = 0,
+    max_seqlen_k: Optional[int] = 0,
+    rotary_seqlens: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+    softmax_scale=None,
     sinks=None,
-    score_mod=None,
-    aux_tensors=None,
-    ver=3,
+    causal=False,
+    window_size=(-1, -1),  # -1 means infinite context window
+    softcap=0.0,  # 0.0 means deactivated
+    rotary_interleaved=True,
+    scheduler_metadata=None,
+    num_splits=0,  # Can be tuned for speed
+    pack_gqa=None,  # Can be tuned for speed
+    sm_margin=0,  # Can be tuned if some SMs are used for communication
+    return_softmax_lse=False,
+    _flash_attn_debug_iteration=None,
+    _flash_attn_debug_layer_id=None,
+    _flash_attn_debug_kind=None,
 ):
     """
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -135,7 +265,6 @@ def flash_attn_with_kvcache(
             Default to 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
-        attention_chunk: Optional[int]. If not None, splits the query into chunks of this size to save memory.
         softcap: float. Anything > 0 activates softcapping attention.
         rotary_interleaved: bool. Only applicable if rotary_cos and rotary_sin are passed in.
             If True, rotary embedding will combine dimensions 0 & 1, 2 & 3, etc. If False,
@@ -146,8 +275,6 @@ def flash_attn_with_kvcache(
            to automatically determine the number of splits.
            Don't change this unless you know what you are doing.
         return_softmax_lse: bool. Whether to return the logsumexp of the attention scores.
-        score_mod [optional]: A callable that takes the attention scores and applies a modification.
-        aux_tensors [optional]: Some score_mods will want to read from global aux_tensors. This is how we thread them through to the inner kernel.
 
     Return:
         out: (batch_size, seqlen, nheads, headdim).
@@ -155,7 +282,45 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-
+    _flash_attn_log_args(
+        _flash_attn_build_header(
+            "flash_attn_with_kvcache",
+            _flash_attn_debug_iteration,
+            _flash_attn_debug_layer_id,
+            _flash_attn_debug_kind,
+        ),
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        k=k,
+        v=v,
+        qv=qv,
+        rotary_cos=rotary_cos,
+        rotary_sin=rotary_sin,
+        cache_seqlens=cache_seqlens,
+        cache_batch_idx=cache_batch_idx,
+        cache_leftpad=cache_leftpad,
+        page_table=page_table,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k_new=cu_seqlens_k_new,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        rotary_seqlens=rotary_seqlens,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        softmax_scale=softmax_scale,
+        sinks=sinks,
+        causal=causal,
+        window_size=window_size,
+        softcap=softcap,
+        rotary_interleaved=rotary_interleaved,
+        scheduler_metadata=scheduler_metadata,
+        num_splits=num_splits,
+        pack_gqa=pack_gqa,
+        sm_margin=sm_margin,
+        return_softmax_lse=return_softmax_lse,
+    )
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:
@@ -182,23 +347,26 @@ def flash_attn_with_kvcache(
     ]
     rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
     rotary_seqlens = maybe_contiguous(rotary_seqlens)
-    attention_chunk = 0 if attention_chunk is None else int(attention_chunk)
 
+    if cu_seqlens_q == None:  # !is_varlen_q
+        cu_seqlens_q = torch.arange(
+            0, q.size(0) + 1, dtype=torch.int, device=q.device
+        ) * q.size(1)
+        max_seqlen_q = q.size(1)
+        q = q.view(-1, q.size(-2), q.size(-1)).contiguous()
+    if cache_seqlens is not None:
+        assert cache_seqlens.size(0) + 1 == cu_seqlens_q.size(0)
+        cu_seqlens_k = cache_seqlens
+        max_seqlen_k = int(cache_seqlens.max().item())
     out, softmax_lse, *rest = torch.ops.sgl_kernel.fwd.default(
         q,
         k_cache,
         v_cache,
-        k,
-        v,
         qv,
-        None,  # out
         cu_seqlens_q,
-        None,  # cu_seqlens_k
-        cu_seqlens_k_new,
-        None,  # seqused_q
-        cache_seqlens,
+        cu_seqlens_k,
         max_seqlen_q,
-        None,  # max_seqlen_k
+        max_seqlen_k,
         page_table,
         cache_batch_idx,
         cache_leftpad,
@@ -209,19 +377,17 @@ def flash_attn_with_kvcache(
         k_descale,
         v_descale,
         softmax_scale,
+        sinks,
         causal,
         window_size[0],
         window_size[1],
-        attention_chunk,
         softcap,
         rotary_interleaved,
         scheduler_metadata,
         num_splits,
         pack_gqa,
         sm_margin,
-        sinks,
     )
-    # return (out, softmax_lse) if return_softmax_lse else out
     return (out, softmax_lse, *rest) if return_softmax_lse else out
 
 
@@ -231,58 +397,80 @@ def flash_attn_varlen_func(
     v,
     cu_seqlens_q,
     cu_seqlens_k,
-    max_seqlen_q=None,
-    max_seqlen_k=None,
+    max_seqlen_q,
+    max_seqlen_k,
     seqused_q=None,
     seqused_k=None,
-    page_table=None,
     softmax_scale=None,
+    sinks=None,
     causal=False,
     qv=None,
     q_descale=None,
     k_descale=None,
     v_descale=None,
     window_size=(-1, -1),
-    attention_chunk=0,
     softcap=0.0,
     num_splits=1,
     pack_gqa=None,
     sm_margin=0,
     return_softmax_lse=False,
-    sinks=None,
-    score_mod=None,
-    aux_tensors=None,
-    ver=3,
+    _flash_attn_debug_iteration=None,
+    _flash_attn_debug_layer_id=None,
+    _flash_attn_debug_kind=None,
 ):
-
+    _flash_attn_log_args(
+        _flash_attn_build_header(
+            "flash_attn_varlen_func",
+            _flash_attn_debug_iteration,
+            _flash_attn_debug_layer_id,
+            _flash_attn_debug_kind,
+        ),
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_q=seqused_q,
+        seqused_k=seqused_k,
+        softmax_scale=softmax_scale,
+        sinks=sinks,
+        causal=causal,
+        qv=qv,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        window_size=window_size,
+        softcap=softcap,
+        num_splits=num_splits,
+        pack_gqa=pack_gqa,
+        sm_margin=sm_margin,
+        return_softmax_lse=return_softmax_lse,
+    )
     if not is_fa3_supported():
         raise NotImplementedError(
-            "flash_attn at sgl-kernel is only supported on sm90 and above"
+            "flash_attn at sgl-kernel-xpu is only supported on BMG and later"
         )
-
-    # FA3 requires max_seqlen_q and max_seqlen_k
-    if max_seqlen_q is None or max_seqlen_k is None:
-        raise ValueError("max_seqlen_q and max_seqlen_k are required for FA3")
 
     if softmax_scale is None:
         softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (
             -0.5
         )
-    attention_chunk = 0 if attention_chunk is None else int(attention_chunk)
+    if cu_seqlens_q == None:  # !is_varlen_q
+        cu_seqlens_q = torch.arange(
+            0, q.size(0) + 1, dtype=torch.int, device=q.device
+        ) * q.size(1)
+        max_seqlen_q = q.size(1)
+        q = q.view(-1, q.size(-2), q.size(-1)).contiguous()
 
     out, softmax_lse, *rest = torch.ops.sgl_kernel.fwd.default(
         q,
         k,
         v,
-        None,  # k_new
-        None,  # v_new
         qv,  # qv
-        None,  # out
         cu_seqlens_q,
         cu_seqlens_k,
-        None,  # cu_seqlens_k_new
-        seqused_q,
-        seqused_k,
         max_seqlen_q,
         max_seqlen_k,
         None,  # page_table,
@@ -290,22 +478,21 @@ def flash_attn_varlen_func(
         None,  # leftpad_k
         None,  # rotary cos
         None,  # rotary sin
-        None,  # seqlens_rotary
+        None,  # rotary_seqlens
         q_descale,
         k_descale,
         v_descale,
         softmax_scale,
+        sinks,
         causal,
         window_size[0],
         window_size[1],
-        attention_chunk,
         softcap,
-        is_rotary_interleaved=False,
-        scheduler_metadata=None,
-        num_splits=num_splits,
-        pack_gqa=pack_gqa,
-        sm_margin=sm_margin,
-        sinks=sinks,
+        False,  # rotary_interleaved
+        None,  # scheduler_metadata
+        num_splits,
+        pack_gqa,
+        sm_margin,
     )
 
     return (out, softmax_lse, *rest) if return_softmax_lse else out

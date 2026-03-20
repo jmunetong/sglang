@@ -1,7 +1,10 @@
 import pytest
 import torch
 import torch.nn.functional as F
+import utils
 from sgl_kernel import dsv3_fused_a_gemm
+
+device = utils.get_device()
 
 
 @pytest.mark.parametrize("num_tokens", [i + 1 for i in range(16)])
@@ -10,13 +13,13 @@ def test_dsv3_fused_a_gemm(num_tokens):
     kHdOut = 2112
 
     mat_a = torch.randn(
-        (num_tokens, kHdIn), dtype=torch.bfloat16, device="cuda"
+        (num_tokens, kHdIn), dtype=torch.bfloat16, device=device
     ).contiguous()
-    mat_b = torch.randn((kHdOut, kHdIn), dtype=torch.bfloat16, device="cuda").transpose(
+    mat_b = torch.randn((kHdOut, kHdIn), dtype=torch.bfloat16, device=device).transpose(
         0, 1
     )
     output = torch.empty(
-        (num_tokens, kHdOut), dtype=torch.bfloat16, device="cuda"
+        (num_tokens, kHdOut), dtype=torch.bfloat16, device=device
     ).contiguous()
 
     ref = F.linear(mat_a, mat_b.T)

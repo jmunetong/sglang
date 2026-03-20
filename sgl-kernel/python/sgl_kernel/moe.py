@@ -1,6 +1,8 @@
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import torch
+
+from .utils import is_xe2_arch
 
 
 def moe_align_block_size(
@@ -28,55 +30,11 @@ def moe_align_block_size(
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    gating_output: torch.Tensor,
+    gating_output: float,
     renormalize: bool = False,
-    moe_softcapping: float = 0.0,
-    correction_bias: Optional[torch.Tensor] = None,
 ) -> None:
-    """
-    Compute top-k softmax for MoE routing.
-
-    Args:
-        topk_weights: Output tensor for top-k weights [num_tokens, topk]
-        topk_ids: Output tensor for top-k expert indices [num_tokens, topk]
-        gating_output: Gating logits [num_tokens, num_experts]
-        renormalize: Whether to renormalize the top-k weights
-        moe_softcapping: Tanh softcapping value (0.0 to disable)
-        correction_bias: Per-expert bias correction [num_experts], must be float32 if provided
-    """
     torch.ops.sgl_kernel.topk_softmax.default(
-        topk_weights,
-        topk_ids,
-        gating_output,
-        renormalize,
-        moe_softcapping,
-        correction_bias,
-    )
-
-
-def topk_sigmoid(
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool = False,
-    correction_bias: Optional[torch.Tensor] = None,
-) -> None:
-    """
-    Compute top-k sigmoid for MoE routing.
-
-    Args:
-        topk_weights: Output tensor for top-k weights [num_tokens, topk]
-        topk_ids: Output tensor for top-k expert indices [num_tokens, topk]
-        gating_output: Gating logits [num_tokens, num_experts]
-        renormalize: Whether to renormalize the top-k weights
-        correction_bias: Per-expert bias correction [num_experts], must be float32 if provided
-    """
-    torch.ops.sgl_kernel.topk_sigmoid.default(
-        topk_weights,
-        topk_ids,
-        gating_output,
-        renormalize,
-        correction_bias,
+        topk_weights, topk_ids, gating_output, renormalize
     )
 
 
@@ -89,6 +47,19 @@ def moe_sum_reduce(
         input_tensor,
         output_tensor,
         routed_scaling_factor,
+    )
+
+
+def swiglu_with_alpha_and_limit(x, gemm1_alpha, gemm1_limit):
+    assert gemm1_limit > 0, f"gemm1_limit must be positive, got {gemm1_limit}"
+    assert x.dim() == 2, f"x must be 2D [B, 2H], got {x.dim()}D"
+    assert (
+        x.size(1) % 2 == 0
+    ), f"Last dim must be even for gate/up split, got {x.size(1)}"
+    return torch.ops.sgl_kernel.swiglu_with_alpha_and_limit.default(
+        x,
+        gemm1_alpha,
+        gemm1_limit,
     )
 
 
@@ -132,41 +103,6 @@ def moe_fused_gate(
         topk_group,
         topk,
         num_fused_shared_experts,
-        routed_scaling_factor,
-        apply_routed_scaling_factor_on_output,
-    )
-
-
-def kimi_k2_moe_fused_gate(
-    input_tensor,
-    bias,
-    topk,
-    renormalize=True,
-    routed_scaling_factor=1.0,
-    apply_routed_scaling_factor_on_output=False,
-):
-    """
-    Simplified fused kernel for Kimi K2 model (num_expert_group=1).
-    This kernel removes the grouped topk logic since all experts belong to a single group.
-
-    Args:
-        input_tensor: Gating output tensor [num_tokens, num_experts]
-        bias: Correction bias tensor [num_experts]
-        topk: Number of experts to select per token
-        renormalize: Whether to renormalize the topk weights
-        routed_scaling_factor: Scaling factor for expert weights
-        apply_routed_scaling_factor_on_output: If true, apply scaling factor to output
-
-    Returns:
-        Tuple of (topk_weights, topk_ids)
-        - topk_weights: [num_tokens, topk] float32 tensor
-        - topk_ids: [num_tokens, topk] int32 tensor
-    """
-    return torch.ops.sgl_kernel.kimi_k2_moe_fused_gate.default(
-        input_tensor,
-        bias,
-        topk,
-        renormalize,
         routed_scaling_factor,
         apply_routed_scaling_factor_on_output,
     )
@@ -251,39 +187,280 @@ def apply_shuffle_mul_sum(
     )
 
 
-def fused_qk_norm_rope(
-    qkv: torch.Tensor,
-    num_heads_q: int,
-    num_heads_k: int,
-    num_heads_v: int,
-    head_dim: int,
-    eps: float,
-    q_weight: torch.Tensor,
-    k_weight: torch.Tensor,
-    base: float,
-    is_neox: bool,
-    position_ids: torch.Tensor,
-    factor: float,
-    low: float,
-    high: float,
-    attention_factor: float,
-    rotary_dim: Optional[int] = None,
-) -> None:
-    torch.ops.sgl_kernel.fused_qk_norm_rope(
-        qkv,
-        num_heads_q,
-        num_heads_k,
-        num_heads_v,
-        head_dim,
-        eps,
-        q_weight,
-        k_weight,
-        base,
-        is_neox,
-        position_ids,
-        factor,
-        low,
-        high,
-        attention_factor,
-        rotary_dim if rotary_dim is not None else head_dim,
+def scatter_tokens_to_experts(input, src2dst_map, output):
+    torch.ops.sgl_kernel.scatter_tokens_to_experts.default(input, src2dst_map, output)
+
+
+def cutlass_fp4_group_mm(
+    a_fp4,
+    b_fp4,
+    a_blockscale,
+    b_blockscale,
+    alphas,
+    out_dtype,
+    device,
+    params: Dict[str, Any],
+):
+    """
+    An FP4 Blockscaled Group Gemm that takes in  a_tensors, b_tensors and runs
+    the gemms for each combination based on the specified problem sizes.
+
+    This is used as the MoE gemm during NVFP4 Quantized FusedMoE forward.
+    - a/b_tensors: the NVFP4 a_ptrs and b_ptrs tensors which are quantized
+                     input and expert weights.
+    - a_/b_scales: The blockscales in FP8-E4M3 precision
+    - ab_strides/c_strides: Strides for the a/b tensors between rows.
+    - expert_offsets/sf_offsets: Indices that mark at which token index
+                    each expert begins its computation. The number of tokens
+                    computed with expert E is expert_offsets[E + 1] -
+                    expert_offsets[E] And the sf_size per expert is
+                    sf_offset[E+1] - sf_offset[E]
+    - problem_sizes: MxNxK sizes of each expert's multiplication in two grouped
+                     MMs used in the fused MoE operation.
+    """
+    m_topk = a_fp4.shape[0]
+    n = b_fp4.shape[1]
+    c_shape = (m_topk, n)
+    c = torch.empty(c_shape, device=device, dtype=out_dtype)
+    torch.ops.sgl_kernel.cutlass_fp4_group_mm.default(
+        c,
+        a_fp4,
+        b_fp4,
+        a_blockscale,
+        b_blockscale,
+        alphas,
+        params["ab_strides"],
+        params["c_strides"],
+        params["problem_sizes"],
+        params["expert_offsets"],
+        params["blockscale_offsets"],
     )
+    return c.to(dtype=out_dtype)
+
+
+def fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    b1: Optional[torch.Tensor] = None,
+    b2: Optional[torch.Tensor] = None,
+    inplace: bool = False,
+    activation: str = "silu",
+    use_fp8_w8a8: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_zp: Optional[torch.Tensor] = None,
+    w2_zp: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[list[int]] = None,
+    no_combine: bool = False,
+    routed_scaling_factor: Optional[float] = None,
+    gemm1_alpha: Optional[float] = None,
+    gemm1_limit: Optional[float] = None,
+) -> torch.Tensor:
+    """
+    This function computes a Mixture of Experts (MoE) layer using two sets of
+    weights, w1 and w2, and top-k gating mechanism.
+
+    Parameters:
+    - hidden_states [num_tokens, hidden_dim] (torch.Tensor): The input tensor to the MoE layer.
+    - w1 [num_experts, hidden_dim, output_channel] (torch.Tensor): The first set of expert weights.
+    - w2 [num_experts, output_channel, hidden_dim] (torch.Tensor): The second set of expert weights.
+    - topk_weights [num_tokens, topk] (torch.Tensor): The top-k output of the experts.
+    - topk_ids [num_tokens, topk] (torch.Tensor): The top-k indices of the experts.
+    - b1 (Optional[torch.Tensor]): Optional bias for w1.
+    - b2 (Optional[torch.Tensor]): Optional bias for w2.
+    - inplace (bool): If True, perform operations in-place to save memory. Defaults to False.
+    - activation (str): The activation function to use ('silu' or 'gelu'). Defaults to 'silu'.
+    - use_fp8_w8a8 (bool): If True, use fp8 arithmetic to compute the inner
+        products for w1 and w2. Defaults to False.
+    - w1_scale (Optional[torch.Tensor]): Optional scale to be used for
+        w1.
+    - w2_scale (Optional[torch.Tensor]): Optional scale to be used for
+        w2.
+    - a1_scale (Optional[torch.Tensor]): Optional scale to be used for
+        a1.
+    - a2_scale (Optional[torch.Tensor]): Optional scale to be used for
+        a2.
+    - block_shape: (Optional[List[int]]): Optional block size for block-wise
+        quantization.
+    - no_combine (bool): If True, skip the combine step. Defaults to False.
+    - routed_scaling_factor (Optional[float]): Optional scaling factor for routed tokens, used by Llama4 only.
+    - gemm1_alpha (Optional[float]): Optional gemm1_alpha for the activation
+        function.
+    - gemm1_limit (Optional[float]): Optional gemm1_limit for the swiglu activation
+        function.
+
+    Returns:
+    - torch.Tensor: The output tensor after applying the MoE layer.
+    """
+
+    assert use_fp8_w8a8 is False, "current MoE does not support use_fp8_w8a8"
+    assert w1_scale is None, "current MoE does not support w1_scale"
+    assert w2_scale is None, "current MoE does not support w2_scale"
+    assert a1_scale is None, "current MoE does not support a1_scale"
+    assert a2_scale is None, "current MoE does not support a2_scale"
+    assert block_shape is None, "current MoE does not support block_shape"
+    assert activation in (
+        "silu",
+        "gelu",
+    ), f"Only silu and gelu are supported but got {activation}"
+
+    # type check
+    assert hidden_states.dtype == torch.bfloat16, "hidden_states must be bfloat16"
+    assert w1.dtype == torch.bfloat16, "w1 must be bfloat16"
+    assert w2.dtype == torch.bfloat16, "w2 must be bfloat16"
+    if b1 is not None:
+        assert b1.dtype == torch.bfloat16, "b1 must be bfloat16"
+    if b2 is not None:
+        assert b2.dtype == torch.bfloat16, "b2 must be bfloat16"
+
+    # Shape check
+    assert hidden_states.ndim == 2, "hidden_states must be 2D"
+    assert (
+        hidden_states.shape[-1] == w1.shape[-1]
+    ), f"hidden_states shape[-1] {hidden_states.shape} must be equal to w1 shape[-2] {w1.shape}"
+    assert (
+        2 * w2.shape[2] == w1.shape[1]
+    ), f"w2 shape[2] {w2.shape[2]} must be half of w1 shape[1] {w1.shape[1]}"
+    assert (topk_ids.shape == topk_weights.shape) and (
+        topk_ids.shape[0] == hidden_states.shape[0]
+    ), f"topk_ids shape {topk_ids.shape} and topk_weights shape {topk_weights.shape} must be equal and match hidden_states shape[0] {hidden_states.shape[0]}"
+
+    num_tokens, hidden_dims = hidden_states.shape
+
+    E, _, K = w1.shape
+    E, OutK, N = w2.shape
+    assert N * 2 == w1.shape[1], "w1 shape[1] must be 2x of w2 shape[2]"
+    if b1 is not None:
+        assert b1.shape == w1.shape[:2], "b1 shape must match w1 shape[:2]"
+    if b2 is not None:
+        assert b2.shape == w2.shape[:2], "b2 shape must match w2 shape[:2]"
+
+    M = num_tokens
+    TopK = topk_ids.shape[1]
+
+    if no_combine:
+        assert not inplace
+        out_hidden_states = torch.empty(
+            (num_tokens, OutK),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+    elif inplace:
+        out_hidden_states = hidden_states
+    else:
+        out_hidden_states = torch.empty_like(hidden_states)
+
+    topk_ids = topk_ids.int() if topk_ids.dtype == torch.long else topk_ids
+    expert_offsets = torch.empty((E), dtype=torch.int32, device=hidden_states.device)
+    problem_sizes1 = torch.empty((E, 3), dtype=torch.int32, device=hidden_states.device)
+    problem_sizes2 = torch.empty((E, 3), dtype=torch.int32, device=hidden_states.device)
+    a_map = torch.empty(
+        (topk_ids.numel()), dtype=torch.int32, device=hidden_states.device
+    )
+    c_map = torch.empty(
+        (topk_ids.numel()), dtype=torch.int32, device=hidden_states.device
+    )
+    torch.ops.sgl_kernel.prepare_moe_input.default(
+        topk_ids,
+        expert_offsets,
+        None,
+        problem_sizes1,
+        problem_sizes2,
+        a_map,
+        c_map,
+        E,
+        hidden_dims,
+        TopK,
+    )
+    input_A_shuffle = torch.empty(
+        (num_tokens * TopK, K), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    # Use scatter_tokens_to_experts (IPEX MoEScatter style):
+    # 1 WG per source token, reads sequentially, scatters to TopK destinations,
+    # with coalesced reads and data reuse.
+    torch.ops.sgl_kernel.scatter_tokens_to_experts.default(
+        hidden_states, c_map, input_A_shuffle
+    )
+
+    intermediate_cache3 = torch.empty(
+        (M * TopK, OutK), device=hidden_states.device, dtype=hidden_states.dtype
+    )
+
+    activation_type = 0 if activation == "silu" else 1
+
+    assert is_xe2_arch(), f"Current MoE is only supported on BMG"
+
+    # heuristic for choosing fused or unfused act, can be tuned
+    avg_m = (M * TopK) // E
+    big_weight = K * N > 4096 * 4096
+    use_unfused_act = avg_m <= 128 and big_weight
+    if use_unfused_act:
+        intermediate_cache1 = torch.empty(
+            (M * TopK, 2 * N), device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        intermediate_cache2 = torch.empty(
+            (M * TopK, N), device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        torch.ops.sgl_kernel.moe_grouped_mm_nt_xe20(
+            intermediate_cache1,
+            input_A_shuffle,
+            w1,
+            b1,
+            expert_offsets,
+            E,
+            activation_type,
+            fuse_act=False,
+        )
+        if activation == "silu":
+            torch.ops.sgl_kernel.silu_and_mul(intermediate_cache2, intermediate_cache1)
+        elif activation == "gelu":
+            torch.ops.sgl_kernel.gelu_tanh_and_mul(
+                intermediate_cache2, intermediate_cache1
+            )
+        else:
+            raise ValueError(f"Unsupported activation {activation}")
+        torch.ops.sgl_kernel.moe_grouped_mm_nt_xe20(
+            intermediate_cache3,
+            intermediate_cache2,
+            w2,
+            b2,
+            expert_offsets,
+            E,
+            activation_type,
+            fuse_act=False,
+        )
+    else:
+        intermediate_cache1 = torch.empty(
+            (M * TopK, N), device=hidden_states.device, dtype=hidden_states.dtype
+        )
+        torch.ops.sgl_kernel.moe_grouped_mm_nt_xe20(
+            intermediate_cache1,
+            input_A_shuffle,
+            w1,
+            b1,
+            expert_offsets,
+            E,
+            activation_type,
+            fuse_act=True,
+        )
+        torch.ops.sgl_kernel.moe_grouped_mm_nt_xe20(
+            intermediate_cache3,
+            intermediate_cache1,
+            w2,
+            b2,
+            expert_offsets,
+            E,
+            activation_type,
+            fuse_act=False,
+        )
+
+    torch.ops.sgl_kernel.apply_shuffle_mul_sum.default(
+        intermediate_cache3, out_hidden_states, c_map, topk_weights
+    )
+
+    return out_hidden_states

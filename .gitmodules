@@ -1,0 +1,3 @@
+[submodule "sgl-kernel-xpu"]
+	path = sgl-kernel-xpu
+	url = https://github.com/sgl-project/sgl-kernel-xpu.git

@@ -421,6 +421,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     # For dumper: request IDs for cross-step sequence tracking
     rids: Optional[List[str]] = None
 
+    # Set by XPU FA backend in init_forward_metadata for flash-attn file logging
+    flash_attn_debug_pass_id: Optional[int] = None
+    flash_attn_debug_kind: Optional[str] = None
+
     @classmethod
     def init_new(
         cls,
