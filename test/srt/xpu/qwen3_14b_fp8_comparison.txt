@@ -1,0 +1,26 @@
+Qwen3-14B-FP8 — device comparison log
+Model: Qwen/Qwen3-14B-FP8
+Run started (UTC): 2026-03-25T17:06:13.208474+00:00
+(Sections appended per test; unittest class order: CPU before XPU.)
+================================================================================
+
+
+################################################################################
+OUTPUT FROM --device XPU (Qwen3-14B-FP8)
+Server device flag: --device xpu
+SGLANG_USE_SGL_XPU=1; see XPU_SERVER_ARGS in test source.
+################################################################################
+--- user prompt ---
+Describe the typical weather in Paris. Describe wheather depending on seasons
+--- assistant message.content ---
+<think>
+Okay, the user wants me to describe the typical weather in Paris, broken down by seasons. Let me start by recalling what I know about Paris's climate. It's in northern France, so probably a temperate climate. I think it's classified as oceanic, which means mild temperatures and frequent precipitation.
+
+First, I should outline each season: spring, summer, autumn, winter. For each, I need to mention temperature ranges, common weather conditions, and maybe
+--- assistant message.reasoning_content (if any) ---
+
+--- usage ---
+  prompt_tokens: 21
+  completion_tokens: 96
+  total_tokens: 117
+================================================================================

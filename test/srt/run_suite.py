@@ -74,9 +74,12 @@ suite_xeon = {
 # NOTE: please sort the test cases alphabetically by the test file name
 suite_xpu = {
     "per-commit-xpu": [
+        TestFile("xpu/test_deepseek_coder_v2_lite_instruct.py"),
         TestFile("xpu/test_deepseek_ocr.py"),
+        TestFile("xpu/test_deepseek_vl2_small.py"),
         TestFile("xpu/test_intel_xpu_backend.py"),
         TestFile("xpu/test_internvl.py"),
+        TestFile("xpu/test_qwen3_14b_fp8.py"),
         TestFile("xpu/test_rmsnorm_xpu.py"),
     ],
 }

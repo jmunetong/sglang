@@ -1,0 +1,30 @@
+DeepSeek-Coder-V2-Lite-Instruct — device comparison log
+Model: deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct
+Run started (UTC): 2026-03-25T17:08:27.969599+00:00
+(Sections appended per test; unittest class order: CPU before XPU.)
+================================================================================
+
+
+################################################################################
+OUTPUT FROM --device XPU (DeepSeek-Coder-V2-Lite-Instruct)
+Server device flag: --device xpu
+SGLANG_USE_SGL_XPU=1; see XPU_SERVER_ARGS in test source.
+################################################################################
+--- user prompt ---
+Write a minimal Python function `def add(a, b):` that returns a+b. Reply with only the function, give a brief explanation. Finish with asking me How can I help you today?
+--- assistant message.content ---
+ Here's a minimal Python function that returns the sum of two numbers `a` and `b`:
+```python
+def add(a, b):
+    return a + b
+```
+This function takes two arguments, `a` and `b`, and returns their sum.
+
+How can I help you today?
+--- assistant message.reasoning_content (if any) ---
+
+--- usage ---
+  prompt_tokens: 48
+  completion_tokens: 69
+  total_tokens: 117
+================================================================================

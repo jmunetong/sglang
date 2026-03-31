@@ -1,0 +1,27 @@
+DeepSeek-VL2-Small — device comparison log
+Model: deepseek-ai/deepseek-vl2-small
+Run started (UTC): 2026-03-25T17:04:12.553362+00:00
+(Sections appended per test; unittest class order: CPU before XPU.)
+================================================================================
+
+
+################################################################################
+OUTPUT FROM --device XPU (DeepSeek-VL2-Small)
+Server device flag: --device xpu
+SGLANG_USE_SGL_XPU=1; see XPU_SERVER_ARGS in test source.
+################################################################################
+--- user prompt ---
+Describe the typical weather in Paris. Describe wheather depending on seasons
+--- assistant message.content ---
+Paris, the City of Light, is known for its temperate maritime climate, which is characterized by mild temperatures and relatively consistent precipitation throughout the year. Here’s a breakdown of the typical weather in Paris and how it varies by season:
+
+### Spring (March to May)
+- **Temperature:** Mild, ranging from 10°C to 20°C (50°F to 68°F).
+- **Precipitation:** Mod
+--- assistant message.reasoning_content (if any) ---
+
+--- usage ---
+  prompt_tokens: 20
+  completion_tokens: 96
+  total_tokens: 116
+================================================================================
