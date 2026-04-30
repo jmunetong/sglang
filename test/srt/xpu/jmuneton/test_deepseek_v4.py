@@ -67,12 +67,20 @@ _SERVER_STDERR_PATH: Path | None = None
 
 
 def _server_subprocess_env() -> dict:
-    return {
-        "TORCHDYNAMO_VERBOSE": "0",
-        "TORCHINDUCTOR_VERBOSE": "0",
-        "TORCH_COMPILE_DEBUG": "0",
-        "TORCH_SHOW_CPP_STACKTRACES": "0",
-    }
+    # Inherit the parent env so the server subprocess sees PATH /
+    # CONDA_PREFIX / PYTHONPATH / ONEAPI_ROOT. Without this, popen passes a
+    # 4-key dict as env= and python3 resolves to /usr/bin/python3, which
+    # does not have sglang installed in your conda env.
+    env = os.environ.copy()
+    env.update(
+        {
+            "TORCHDYNAMO_VERBOSE": "0",
+            "TORCHINDUCTOR_VERBOSE": "0",
+            "TORCH_COMPILE_DEBUG": "0",
+            "TORCH_SHOW_CPP_STACKTRACES": "0",
+        }
+    )
+    return env
 
 
 def _prettify_spm_style_text(s: str) -> str:
