@@ -8,7 +8,7 @@ Model card: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash
 
 Run from test/srt::
 
-  python3 -m unittest xpu.test_deepseek_v4.TestDeepSeekV4XPU.test_simple_code_qa
+  python3 -m unittest xpu.jmuneton.test_deepseek_v4.TestDeepSeekV4XPU.test_simple_code_qa
 
 Logs written under ``test_run_logs/deepseek_v4/<UTC-timestamp>/``:
   - ``server.stdout.log`` / ``server.stderr.log`` — streamed server output,
