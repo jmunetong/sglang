@@ -10,7 +10,10 @@ Run from test/srt::
 
   python3 -m unittest xpu.jmuneton.test_deepseek_v4.TestDeepSeekV4XPU.test_simple_code_qa
 
-Logs written under ``test_run_logs/deepseek_v4/<UTC-timestamp>/``:
+Logs written under ``test_run_logs/deepseek_v4/v<N>/`` where N is the next
+free version slot (picked by scanning existing ``test_log_v*.log`` files in
+the parent directory). The runner script also emits a top-level
+``test_log_v<N>.log`` with the full console output.
   - ``server.stdout.log`` / ``server.stderr.log`` — streamed server output,
     written incrementally so they survive crashes / timeouts during setUp.
   - ``response.txt``                              — the OpenAI response body,
@@ -18,6 +21,9 @@ Logs written under ``test_run_logs/deepseek_v4/<UTC-timestamp>/``:
     assertion failure.
   - ``run.log``                                   — high-level per-test
     timeline (launch args, timings, pass/fail).
+
+The version number comes from ``SGLANG_DSV4_RUN_VERSION`` when set (the
+runner script sets this); otherwise the test computes it itself.
 
 The summary file ``deepseek_v4_comparison.txt`` in this directory is still
 appended for parity with the Gemma-4 test.
@@ -102,11 +108,40 @@ def _run_log(msg: str) -> None:
         pass
 
 
+def _pick_run_version() -> int:
+    """Pick the next free v<N> slot based on existing test_log_v*.log files.
+
+    The runner script writes ``test_log_v<N>.log`` in TEST_RUN_LOGS_ROOT and
+    exports ``SGLANG_DSV4_RUN_VERSION=<N>``. If the env var is set we trust
+    it; otherwise compute N here so direct ``python3 -m unittest`` also
+    produces a correctly-named slot.
+    """
+    env_v = os.environ.get("SGLANG_DSV4_RUN_VERSION")
+    if env_v and env_v.isdigit():
+        return int(env_v)
+
+    TEST_RUN_LOGS_ROOT.mkdir(parents=True, exist_ok=True)
+    highest = 0
+    for p in TEST_RUN_LOGS_ROOT.glob("test_log_v*.log"):
+        stem = p.stem  # test_log_vN
+        try:
+            highest = max(highest, int(stem[len("test_log_v") :]))
+        except ValueError:
+            continue
+    for p in TEST_RUN_LOGS_ROOT.glob("v*"):
+        if p.is_dir() and p.name.startswith("v"):
+            try:
+                highest = max(highest, int(p.name[1:]))
+            except ValueError:
+                continue
+    return highest + 1
+
+
 def setUpModule():
     global _RUN_DIR, _RUN_LOG_PATH, _SERVER_STDOUT_PATH, _SERVER_STDERR_PATH
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    _RUN_DIR = TEST_RUN_LOGS_ROOT / stamp
+    version = _pick_run_version()
+    _RUN_DIR = TEST_RUN_LOGS_ROOT / f"v{version}"
     _RUN_DIR.mkdir(parents=True, exist_ok=True)
 
     _RUN_LOG_PATH = _RUN_DIR / "run.log"
