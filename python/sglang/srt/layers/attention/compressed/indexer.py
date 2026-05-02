@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v4 import C4Indexer
 
-__is_xpu = is_xpu()
+_is_xpu = is_xpu()
 
 if is_hip():
     FP8_DTYPE = torch.float8_e4m3fnuz
@@ -63,16 +63,21 @@ def fp8_paged_mqa_logits_torch(
     assert clean_logits == False
 
     logits = page_table.new_empty((batch_size, max_seq_len), dtype=torch.float32)
+    # XPU / Level-Zero: a per-iteration `.item()` issues a synchronous D2H
+    # memcpy inside the driver command list, which serializes and hangs
+    # appendUSMMemcpy on `libze_intel_gpu.so`. Hoist the transfer to a
+    # single batched read before the loop. Also hoist the view-reshape,
+    # which has no loop-carried dependency.
+    seq_lens_cpu = seq_lens.detach().to("cpu").tolist()
+    kvcache_fp8 = kvcache_fp8.view(-1, block_size * (head_dim + 4))
     for i in range(batch_size):
-        q = q_fp8[i, 0]
-        q = q.to(torch.float32)
+        q = q_fp8[i, 0].to(torch.float32)
         q_scale = weight[i]
-        seq_len = int(seq_lens[i].item())
+        seq_len = int(seq_lens_cpu[i])
         assert seq_len <= max_seq_len
         num_pages = (seq_len + block_size - 1) // block_size
         padded_seq_len = num_pages * block_size
         pages = page_table[i, :num_pages]
-        kvcache_fp8 = kvcache_fp8.view(-1, block_size * (head_dim + 4))
         kvcache = kvcache_fp8[pages]
         SCALE_OFFSET = block_size * head_dim
         kvcache_value = kvcache[..., :SCALE_OFFSET].view(dtype=FP8_DTYPE)
