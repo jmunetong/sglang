@@ -1634,7 +1634,13 @@ def biased_grouped_topk_gpu(
                 apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
             )
         elif (
-            _is_xpu
+            # XPU: topk_sigmoid is a CUDA-only JIT kernel (jit_kernel/moe_topk_sigmoid.py
+            # builds moe_topk_sigmoid.cuh via tvm_ffi with CUDA/HIP-only target flags),
+            # so calling it on an Intel XPU crashes with "Could not find CUDA
+            # installation". Disable this branch and fall through to the pure-torch
+            # biased_grouped_topk_impl below, which runs correctly on XPU.
+            False
+            and _is_xpu
             and num_expert_group == 1
             and topk_group == 1
             and num_fused_shared_experts == 0
