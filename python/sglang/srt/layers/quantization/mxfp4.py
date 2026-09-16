@@ -1079,18 +1079,39 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             # layout: packed e2m1 [E, N, K/2] plus N-outer ue8m0 scales
             # [E, N, K/32] uint8, with GPT-OSS's interleaved
             # [gate_0, up_0, gate_1, up_1, ...] w13 row order (which is exactly
-            # what the swiglu epilogue expects). Scales and biases are already in
-            # the expected dtypes (uint8 / bf16 -- the launcher promotes bias to
-            # fp32 since the kernel accumulates it in fp32), so the only step is
-            # reinterpreting the packed nibbles as int8, matching the dtype the
-            # kernel keys the 4-bit path on. That is a free view, and crucially
-            # there is no bf16 upcast -- the whole point of MXFP4 on XPU.
+            # what the swiglu epilogue expects). Scales are already in the
+            # expected dtype (uint8), so the only weight step is reinterpreting
+            # the packed nibbles as int8, matching the dtype the kernel keys the
+            # 4-bit path on. That is a free view, and crucially there is no bf16
+            # upcast -- the whole point of MXFP4 on XPU.
             layer.w13_weight = Parameter(
                 layer.w13_weight.data.view(torch.int8), requires_grad=False
             )
             layer.w2_weight = Parameter(
                 layer.w2_weight.data.view(torch.int8), requires_grad=False
             )
+            # The bias is the one operand whose dtype does not already match: the
+            # Xe2 grouped GEMMs accumulate it in fp32 and take an [E, N] fp32
+            # operand, while create_weights() allocates it bf16. Promote it here,
+            # once, instead of leaving it to the launcher -- which had no choice
+            # but to cast on every forward, and at gpt-oss-120b decode (tp=4,
+            # E=128, I_p=736) that pair of casts was ~21 us of device time per
+            # fused_experts call, 72 of the 73 elementwise-copy launches per
+            # decode step. The aiter and CPU-AMX branches above already do this;
+            # XPU was the outlier. bf16 -> fp32 is exactly representable, so the
+            # promotion is bit-identical to the per-forward cast it replaces.
+            #
+            # Cost is 2 extra bytes per bias element, all of it weights: at the
+            # shapes above, [128, 1472] + [128, 2880] = 557k elements, so 1.06
+            # MiB per layer and ~38 MiB per rank across 36 layers.
+            for bias_name in ("w13_weight_bias", "w2_weight_bias"):
+                bias = getattr(layer, bias_name, None)
+                if bias is not None and bias.dtype != torch.float32:
+                    setattr(
+                        layer,
+                        bias_name,
+                        Parameter(bias.data.float(), requires_grad=False),
+                    )
             return
         else:
             from triton_kernels.numerics_details.mxfp import upcast_from_mxfp
